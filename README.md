@@ -1,1 +1,1 @@
-Resilient Estimation-Driven Thresholding and Transmission Strategy for Efficient Remote Decision Making
+# Resilient Estimation-Driven Thresholding and Transmission Strategy for Efficient Remote Decision Making
