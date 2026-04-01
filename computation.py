@@ -3,8 +3,9 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Optional, Union
 
 import numpy as np
-from scipy.linalg import solve, solve_discrete_lyapunov
+from scipy.linalg import solve, solve_discrete_lyapunov, solve_discrete_are
 from scipy.stats import multivariate_normal, norm
+from scipy.optimize import minimize_scalar
 
 ArrayLike = Union[np.ndarray, list, tuple]
 ParamsLike = Union[Mapping[str, Any], Any]
@@ -52,6 +53,359 @@ def spectral_radius(A: np.ndarray) -> float:
     """Return the spectral radius rho(A)."""
     eigvals = np.linalg.eigvals(A)
     return float(np.max(np.abs(eigvals)))
+
+def compute_steady_state_kf_posterior_covariance(
+    A: ArrayLike,
+    C: ArrayLike,
+    Q: ArrayLike,
+    R: ArrayLike,
+    P0: Optional[ArrayLike] = None,
+    tol: float = 1e-10,
+    max_iter: int = 10000,
+) -> Dict[str, Any]:
+    """
+    Compute the steady-state posterior covariance of the sensor-side Kalman filter.
+
+    This is the covariance of estimation error after measurement update:
+        P_inf = lim P_{k|k}
+
+    It is NOT the same as Sigma = var(x_k).
+    """
+    A = _as_array(A)
+    C = _as_array(C)
+    Q = _as_array(Q)
+    R = _as_array(R)
+
+    n = A.shape[0]
+    I = np.eye(n)
+
+    if P0 is None:
+        P = np.eye(n, dtype=float)
+    else:
+        P = _as_array(P0).copy()
+
+    last_diff = None
+
+    for it in range(max_iter):
+        P_pred = A @ P @ A.T + Q
+        S = C @ P_pred @ C.T + R
+        K = P_pred @ C.T @ np.linalg.inv(S)
+
+        # Joseph form
+        P_next = (I - K @ C) @ P_pred @ (I - K @ C).T + K @ R @ K.T
+
+        diff = np.linalg.norm(P_next - P, ord="fro")
+        P = P_next
+
+        if diff < tol:
+            last_diff = diff
+            return {
+                "P_inf": P,
+                "num_iterations": it + 1,
+                "converged": True,
+                "residual_norm": diff,
+            }
+
+        last_diff = diff
+
+    return {
+        "P_inf": P,
+        "num_iterations": max_iter,
+        "converged": False,
+        "residual_norm": last_diff,
+    }
+
+
+def _phi2(x: float, y: float, rho: float) -> float:
+    """
+    Bivariate standard normal CDF Phi_2(x, y; rho).
+    """
+    rho = float(np.clip(rho, -1.0, 1.0))
+    cov = np.array([[1.0, rho], [rho, 1.0]], dtype=float)
+    return float(multivariate_normal(mean=[0.0, 0.0], cov=cov).cdf([x, y]))
+
+
+def compute_xi_interval(
+    Delta: float,
+    sigma_p: float,
+    alpha_fp: float,
+    alpha_fn: float,
+) -> Dict[str, float]:
+    """
+    Compute the admissible interval of xi inside the confusion region
+    in the hat{s}-domain.
+
+    gamma_1 = Delta - z_minus * sigma_p
+    gamma_0 = Delta - z_plus  * sigma_p
+    """
+    bounds = compute_decision_bounds(alpha_fp=alpha_fp, alpha_fn=alpha_fn)
+    z_minus = bounds["z_minus"]
+    z_plus = bounds["z_plus"]
+
+    gamma_1 = float(Delta - z_minus * sigma_p)
+    gamma_0 = float(Delta - z_plus * sigma_p)
+
+    if gamma_0 > gamma_1:
+        raise ValueError(
+            f"Invalid xi interval: gamma_0={gamma_0} > gamma_1={gamma_1}."
+        )
+
+    return {
+        "z_minus": z_minus,
+        "z_plus": z_plus,
+        "gamma_0": gamma_0,
+        "gamma_1": gamma_1,
+        "xi_lower": gamma_0,
+        "xi_upper": gamma_1,
+    }
+
+
+def compute_benchmark_rates_from_xi(
+        s_bar: float,
+        sigma_s2: float,
+        sigma_p2: float,
+        Delta: float,
+        xi: float,
+    ) -> Dict[str, float]:
+    """
+    Exact steady-state FPR/FNR of the full current decision rule
+    when the hybrid rule collapses to the single-threshold rule:
+        pi_cur = 1{ hat{s} >= xi }
+
+    This is valid when xi lies inside the admissible interval [gamma_0, gamma_1].
+    """
+    sigma_s2 = float(max(sigma_s2, 0.0))
+    sigma_p2 = float(max(sigma_p2, 0.0))
+
+    if sigma_p2 > sigma_s2 + 1e-10:
+        raise ValueError(
+            f"sigma_p^2 must not exceed sigma_s^2, got sigma_p2={sigma_p2}, sigma_s2={sigma_s2}."
+        )
+
+    sigma_hat2 = max(sigma_s2 - sigma_p2, 0.0)
+    sigma_s = float(np.sqrt(sigma_s2))
+    sigma_hat = float(np.sqrt(sigma_hat2))
+
+    if sigma_s <= 0.0:
+        raise ValueError("sigma_s must be positive.")
+    if sigma_hat <= 0.0:
+        raise ValueError("sigma_hat must be positive.")
+
+    a = float((Delta - s_bar) / sigma_s)
+    b = float((xi - s_bar) / sigma_hat)
+    rho = float(np.clip(sigma_hat / sigma_s, -1.0, 1.0))
+
+    Phi_a = float(norm.cdf(a))
+    Phi_b = float(norm.cdf(b))
+    Phi2_ab = _phi2(a, b, rho)
+
+    denom_neg = Phi_a
+    denom_pos = 1.0 - Phi_a
+
+    FPR = 0.0 if denom_neg <= 0.0 else float((Phi_a - Phi2_ab) / denom_neg)
+    FNR = 0.0 if denom_pos <= 0.0 else float((Phi_b - Phi2_ab) / denom_pos)
+
+    return {
+        "FPR_xi": FPR,
+        "FNR_xi": FNR,
+        "sigma_hat2": sigma_hat2,
+        "sigma_hat": sigma_hat,
+        "sigma_s": sigma_s,
+        "rho": rho,
+        "a": a,
+        "b_xi": b,
+        "Phi_a": Phi_a,
+        "Phi_b_xi": Phi_b,
+        "Phi2_a_bxi": Phi2_ab,
+    }
+
+
+def compute_optimal_xi(
+    s_bar: float,
+    sigma_s2: float,
+    sigma_p2: float,
+    Delta: float,
+    alpha_fp: float,
+    alpha_fn: float,
+    weight_fp: float = 1.0,
+    weight_fn: float = 1.0,
+) -> Dict[str, Any]:
+    """
+    Optimize xi inside [gamma_0, gamma_1] for the current sensor-side decision.
+
+    Objective:
+        J(xi) = weight_fp * FPR(xi) + weight_fn * FNR(xi)
+    """
+    sigma_p = float(np.sqrt(max(sigma_p2, 0.0)))
+    xi_info = compute_xi_interval(
+        Delta=Delta,
+        sigma_p=sigma_p,
+        alpha_fp=alpha_fp,
+        alpha_fn=alpha_fn,
+    )
+
+    xi_lower = xi_info["xi_lower"]
+    xi_upper = xi_info["xi_upper"]
+
+    def objective(xi_value: float) -> float:
+        rates = compute_benchmark_rates_from_xi(
+            s_bar=s_bar,
+            sigma_s2=sigma_s2,
+            sigma_p2=sigma_p2,
+            Delta=Delta,
+            xi=xi_value,
+        )
+        return float(weight_fp * rates["FPR_xi"] + weight_fn * rates["FNR_xi"])
+
+    result = minimize_scalar(
+        objective,
+        bounds=(xi_lower, xi_upper),
+        method="bounded",
+    )
+
+    xi_star = float(result.x)
+    rates_star = compute_benchmark_rates_from_xi(
+        s_bar=s_bar,
+        sigma_s2=sigma_s2,
+        sigma_p2=sigma_p2,
+        Delta=Delta,
+        xi=xi_star,
+    )
+
+    return {
+        **xi_info,
+        "xi_star": xi_star,
+        "objective_value": float(result.fun),
+        "optimization_success": bool(result.success),
+        "optimization_message": result.message,
+        "weight_fp": float(weight_fp),
+        "weight_fn": float(weight_fn),
+        **rates_star,
+    }
+
+
+def compute_steady_state_benchmark(
+    A: ArrayLike,
+    C: ArrayLike,
+    Q: ArrayLike,
+    R: ArrayLike,
+    c: ArrayLike,
+    Delta: float,
+    alpha_fp: float,
+    alpha_fn: float,
+    mu_w: Optional[ArrayLike] = None,
+    xi_mode: str = "optimal",
+    xi_value: Optional[float] = None,
+    weight_fp: float = 1.0,
+    weight_fn: float = 1.0,
+) -> Dict[str, Any]:
+    """
+    Compute the steady-state benchmark for the CURRENT sensor-side decision
+    using the hybrid rule resolved by xi inside the confusion region.
+
+    IMPORTANT:
+    - This benchmark is for the current decision only.
+    - Predictive update logic should still use the reliable thresholds z_minus, z_plus.
+    """
+    stationary = compute_stationary_statistics(
+        A=A,
+        Q=Q,
+        c=c,
+        Delta=Delta,
+        mu_w=mu_w,
+    )
+
+    kf_ss = compute_steady_state_kf_posterior_covariance(
+        A=A,
+        C=C,
+        Q=Q,
+        R=R,
+    )
+    P_inf = kf_ss["P_inf"]
+
+    c_col = _as_column(c)
+    sigma_p2 = _scalar(c_col.T @ P_inf @ c_col)
+    sigma_p2 = max(sigma_p2, 0.0)
+    sigma_p = float(np.sqrt(sigma_p2))
+
+    xi_interval = compute_xi_interval(
+        Delta=Delta,
+        sigma_p=sigma_p,
+        alpha_fp=alpha_fp,
+        alpha_fn=alpha_fn,
+    )
+
+    if xi_mode == "optimal":
+        xi_result = compute_optimal_xi(
+            s_bar=stationary["s_bar"],
+            sigma_s2=stationary["sigma_s2"],
+            sigma_p2=sigma_p2,
+            Delta=Delta,
+            alpha_fp=alpha_fp,
+            alpha_fn=alpha_fn,
+            weight_fp=weight_fp,
+            weight_fn=weight_fn,
+        )
+        xi = xi_result["xi_star"]
+
+    elif xi_mode == "delta":
+        xi = float(Delta)
+        if not (xi_interval["xi_lower"] <= xi <= xi_interval["xi_upper"]):
+            xi = float(np.clip(xi, xi_interval["xi_lower"], xi_interval["xi_upper"]))
+        xi_result = {
+            **xi_interval,
+            "xi_star": xi,
+            "objective_value": None,
+            "optimization_success": True,
+            "optimization_message": "xi fixed at Delta, clipped into admissible interval if needed.",
+            "weight_fp": float(weight_fp),
+            "weight_fn": float(weight_fn),
+        }
+
+    elif xi_mode == "manual":
+        if xi_value is None:
+            raise ValueError("xi_value must be provided when xi_mode='manual'.")
+        xi = float(xi_value)
+        xi_result = {
+            **xi_interval,
+            "xi_star": xi,
+            "objective_value": None,
+            "optimization_success": True,
+            "optimization_message": "xi fixed manually by user.",
+            "weight_fp": float(weight_fp),
+            "weight_fn": float(weight_fn),
+        }
+
+    else:
+        raise ValueError(
+            f"Unsupported xi_mode='{xi_mode}'. Use 'optimal', 'delta', or 'manual'."
+        )
+
+    xi_in_interval = bool(xi_interval["xi_lower"] <= xi <= xi_interval["xi_upper"])
+
+    rates = compute_benchmark_rates_from_xi(
+        s_bar=stationary["s_bar"],
+        sigma_s2=stationary["sigma_s2"],
+        sigma_p2=sigma_p2,
+        Delta=Delta,
+        xi=xi,
+    )
+
+    return {
+        "s_bar": stationary["s_bar"],
+        "sigma_s2": stationary["sigma_s2"],
+        "Sigma": stationary["Sigma"],
+        "P_inf": P_inf,
+        "sigma_p2": sigma_p2,
+        "sigma_p": sigma_p,
+        "xi": xi,
+        "xi_mode": xi_mode,
+        "xi_in_admissible_interval": xi_in_interval,
+        **xi_interval,
+        **xi_result,
+        **rates,
+        "kf_steady_state": kf_ss,
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -407,6 +761,7 @@ def predictive_transition_detection(
     }
 
 
+
 # -----------------------------------------------------------------------------
 # Markov-surrogate quantities from Theorem 1
 # -----------------------------------------------------------------------------
@@ -510,7 +865,9 @@ def precompute_all(params: ParamsLike) -> Dict[str, Any]:
     validate_parameters(params)
 
     A = _as_array(_get_param(params, "A"))
+    C = _as_array(_get_param(params, "C"))
     Q = _as_array(_get_param(params, "Q"))
+    R = _as_array(_get_param(params, "R"))
     c = _as_column(_get_param(params, "c"))
     Delta = float(_get_param(params, "Delta"))
 
@@ -520,6 +877,11 @@ def precompute_all(params: ParamsLike) -> Dict[str, Any]:
     alpha_fn = float(_get_param(params, "ALPHA_FN", DEFAULT_ALPHA_FN))
     alpha_fp = float(_get_param(params, "ALPHA_FP", DEFAULT_ALPHA_FP))
     ell = int(_get_param(params, "LOOKAHEAD_ELL", DEFAULT_LOOKAHEAD_ELL))
+
+    xi_mode = _get_param(params, "XI_MODE", "optimal")
+    xi_value = _get_param(params, "XI_VALUE", None)
+    weight_fp = float(_get_param(params, "XI_WEIGHT_FP", 1.0))
+    weight_fn = float(_get_param(params, "XI_WEIGHT_FN", 1.0))
 
     stationary = compute_stationary_statistics(
         A=A,
@@ -550,12 +912,29 @@ def precompute_all(params: ParamsLike) -> Dict[str, Any]:
         q11=markov["q11"],
     )
 
+    benchmark = compute_steady_state_benchmark(
+        A=A,
+        C=C,
+        Q=Q,
+        R=R,
+        c=c,
+        Delta=Delta,
+        alpha_fp=alpha_fp,
+        alpha_fn=alpha_fn,
+        mu_w=mu_w,
+        xi_mode=xi_mode,
+        xi_value=xi_value,
+        weight_fp=weight_fp,
+        weight_fn=weight_fn,
+    )
+
     return {
         "used_defaults": {
             "MU_W_defaulted": _get_param(params, "MU_W", None) is None,
             "ALPHA_FN_defaulted": _get_param(params, "ALPHA_FN", None) is None,
             "ALPHA_FP_defaulted": _get_param(params, "ALPHA_FP", None) is None,
             "LOOKAHEAD_ELL_defaulted": _get_param(params, "LOOKAHEAD_ELL", None) is None,
+            "XI_MODE_defaulted": _get_param(params, "XI_MODE", None) is None,
         },
         "basic_inputs": {
             "Delta": Delta,
@@ -563,11 +942,16 @@ def precompute_all(params: ParamsLike) -> Dict[str, Any]:
             "ALPHA_FN": alpha_fn,
             "ALPHA_FP": alpha_fp,
             "LOOKAHEAD_ELL": ell,
+            "XI_MODE": xi_mode,
+            "XI_VALUE": xi_value,
+            "XI_WEIGHT_FP": weight_fp,
+            "XI_WEIGHT_FN": weight_fn,
         },
         "stationary": stationary,
         "decision_bounds": decision_bounds,
         "markov_surrogate": markov,
         "markov_chain_statistics": chain_stats,
+        "steady_state_benchmark": benchmark,
     }
 
 
@@ -588,3 +972,16 @@ if __name__ == "__main__":
     print(f"q11                : {derived['markov_surrogate']['q11']:.6f}")
     print(f"pi0                : {derived['markov_chain_statistics']['pi0']:.6f}")
     print(f"pi1                : {derived['markov_chain_statistics']['pi1']:.6f}")
+
+    print("\n=== Steady-state benchmark for current decision ===")
+    print(f"xi mode            : {derived['steady_state_benchmark']['xi_mode']}")
+    print(f"xi*                : {derived['steady_state_benchmark']['xi']:.6f}")
+    print(f"xi lower bound     : {derived['steady_state_benchmark']['xi_lower']:.6f}")
+    print(f"xi upper bound     : {derived['steady_state_benchmark']['xi_upper']:.6f}")
+    print(f"xi admissible      : {derived['steady_state_benchmark']['xi_in_admissible_interval']}")
+    print(f"FPR(xi*)           : {derived['steady_state_benchmark']['FPR_xi']:.6f}")
+    print(f"FNR(xi*)           : {derived['steady_state_benchmark']['FNR_xi']:.6f}")
+    print(f"objective value    : {derived['steady_state_benchmark']['objective_value']}")
+    print(f"sigma_p^2          : {derived['steady_state_benchmark']['sigma_p2']:.6f}")
+    print(f"sigma_hat^2        : {derived['steady_state_benchmark']['sigma_hat2']:.6f}")
+    print(f"rho                : {derived['steady_state_benchmark']['rho']:.6f}")

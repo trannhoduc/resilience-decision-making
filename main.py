@@ -1,10 +1,12 @@
 from PARAMETERS import *
 from model import *
-from computation import evaluate_decision
+from computation import evaluate_decision, precompute_all
 
 
 if __name__ == "__main__":
     np.random.seed(42)
+
+    import PARAMETERS as P
 
     # -------------------------------------------------
     # Design parameters used by the reliable decision rule
@@ -32,6 +34,9 @@ if __name__ == "__main__":
     x_hat0 = np.array([0.0, 0.0])
     P0 = np.eye(2)
 
+    derived = precompute_all(P)
+    xi = derived["steady_state_benchmark"]["xi"]
+
     estimator = RemoteEstimator(
         A=A,
         Q=Q,
@@ -40,6 +45,7 @@ if __name__ == "__main__":
         epsilon=epsilon,
         alpha_fp=alpha_fp,
         alpha_fn=alpha_fn,
+        xi=xi,
     )
     estimator.init_value(x_hat0, P0)
 
@@ -72,6 +78,7 @@ if __name__ == "__main__":
     # Build predictive-only policy
     # No resilience update here yet
     # -------------------------------------------------
+
     policy = build_predictive_policy(
         A=A,
         Q=Q,
@@ -80,8 +87,11 @@ if __name__ == "__main__":
         alpha_fp=alpha_fp,
         alpha_fn=alpha_fn,
         ell=lookahead_ell,
+        xi=xi,
         initial_decision=initial_decision,
     )
+
+    policy = probability_policy
 
     # -------------------------------------------------
     # Run simulation

@@ -100,7 +100,7 @@ class RemoteEstimator:
         P_k     = delta_k * P_s_k + (1-delta_k) * (A P_{k-1} A^T + Q)
     """
 
-    def __init__(self, A, Q, c, Delta, epsilon, alpha_fp, alpha_fn):
+    def __init__(self, A, Q, c, Delta, epsilon, alpha_fp, alpha_fn, xi):
         self.A = A
         self.Q = Q
         self.c = np.asarray(c, dtype=float).reshape(-1, 1)
@@ -109,6 +109,7 @@ class RemoteEstimator:
 
         self.alpha_fp = float(alpha_fp)
         self.alpha_fn = float(alpha_fn)
+        self.xi = float(xi)
 
         self.n = A.shape[0]
 
@@ -122,8 +123,8 @@ class RemoteEstimator:
         self.x_hat = np.asarray(x_hat0, dtype=float).reshape(-1, 1)
         self.P = np.asarray(P0, dtype=float)
 
-        # initialize previous decision using a simple threshold on the initial estimate
-        self.last_decision = self.hard_decision(self.x_hat)
+        init_info = self.current_decision_from_fresh_update(self.x_hat, self.P)
+        self.last_decision = int(init_info["pi"])
 
     def hard_decision(self, x):
         value = float(self.c.T @ x)
@@ -163,6 +164,36 @@ class RemoteEstimator:
         )
         return info
 
+    def current_decision_from_fresh_update(self, x_hat=None, P=None):
+        """
+        Estimator-side current decision when a fresh sensor update is available:
+        - outside confusion region: reliable rule
+        - inside confusion region: resolve by xi
+        """
+        if x_hat is None:
+            x_hat = self.x_hat
+        if P is None:
+            P = self.P
+
+        info = evaluate_decision(
+            x_hat=x_hat,
+            P=P,
+            c=self.c,
+            Delta=self.Delta,
+            alpha_fp=self.alpha_fp,
+            alpha_fn=self.alpha_fn,
+            previous_decision=self.last_decision,
+        )
+
+        if info["region"] == "confusion":
+            s_hat = float((self.c.T @ x_hat).item())
+            info["pi"] = 1 if s_hat >= self.xi else 0
+            info["used_xi_inside_confusion"] = True
+        else:
+            info["used_xi_inside_confusion"] = False
+
+        return info
+
     def step(self, x_s, P_s, transmit):
         """
         Remote estimator update.
@@ -178,7 +209,14 @@ class RemoteEstimator:
         self.x_hat = delta_k * x_s + (1 - delta_k) * x_pred
         self.P = delta_k * P_s + (1 - delta_k) * P_pred
 
-        decision_info = self.reliable_decision(self.x_hat, self.P)
+        if delta_k == 1:
+            # Fresh sensor update: xi is meaningful here
+            decision_info = self.current_decision_from_fresh_update(self.x_hat, self.P)
+        else:
+            # No fresh update: use reliable rule only;
+            # if still in confusion region, it automatically keeps the previous decision
+            decision_info = self.reliable_decision(self.x_hat, self.P)
+
         decision = int(decision_info["pi"])
         self.last_decision = decision
 
@@ -200,11 +238,12 @@ class PredictivePolicy:
       to see whether a future transition within ell should be sent now.
     """
 
-    def __init__(self, A, Q, c, Delta, alpha_fp, alpha_fn, ell, initial_decision=0):
+    def __init__(self, A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi, initial_decision=0):
         self.A = A
         self.Q = Q
         self.c = np.asarray(c, dtype=float).reshape(-1, 1)
         self.Delta = float(Delta)
+        self.xi = float(xi)
 
         self.alpha_fp = float(alpha_fp)
         self.alpha_fn = float(alpha_fn)
@@ -219,6 +258,35 @@ class PredictivePolicy:
         # debug info
         self.last_prediction = None
         self.last_local_decision_info = None
+
+    def current_sensor_decision(self, x_s, P_s, previous_decision):
+        """
+        Current sensor-side decision:
+        - outside confusion region: use reliable rule
+        - inside confusion region: resolve by xi
+
+        This is used ONLY for the current sensor-side classification.
+        It is NOT used for predictive triggering.
+        """
+        info = evaluate_decision(
+            x_hat=x_s,
+            P=P_s,
+            c=self.c,
+            Delta=self.Delta,
+            alpha_fp=self.alpha_fp,
+            alpha_fn=self.alpha_fn,
+            previous_decision=previous_decision,
+        )
+
+        if info["region"] == "confusion":
+            s_hat = float((self.c.T @ x_s).item())
+            pi_cur = 1 if s_hat >= self.xi else 0
+            info["pi"] = pi_cur
+            info["used_xi_inside_confusion"] = True
+        else:
+            info["used_xi_inside_confusion"] = False
+
+        return info
 
     def __call__(self, x_true, x_s, P_s, x_hat_remote, P_remote, k):
         """
@@ -236,13 +304,13 @@ class PredictivePolicy:
         # -------------------------------------------------
         previous_decision = self.last_local_decision
 
-        local_info = evaluate_decision(
-            x_hat=x_s,
-            P=P_s,
-            c=self.c,
-            Delta=self.Delta,
-            alpha_fp=self.alpha_fp,
-            alpha_fn=self.alpha_fn,
+        # -------------------------------------------------
+        # Current sensor-side decision:
+        # reliable outside confusion, xi-based inside confusion
+        # -------------------------------------------------
+        local_info = self.current_sensor_decision(
+            x_s=x_s,
+            P_s=P_s,
             previous_decision=previous_decision,
         )
         m_k = int(local_info["pi"])
@@ -350,7 +418,7 @@ class PredictivePolicy:
         self.last_local_decision = m_k
         return transmit
 
-def build_predictive_policy(A, Q, c, Delta, alpha_fp, alpha_fn, ell, initial_decision=0):
+def build_predictive_policy(A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi, initial_decision=0):
     return PredictivePolicy(
         A=A,
         Q=Q,
@@ -359,6 +427,7 @@ def build_predictive_policy(A, Q, c, Delta, alpha_fp, alpha_fn, ell, initial_dec
         alpha_fp=alpha_fp,
         alpha_fn=alpha_fn,
         ell=ell,
+        xi=xi,
         initial_decision=initial_decision,
     )
 
@@ -585,6 +654,6 @@ def plot_results(results, Delta):
     plt.show()
 
 def probability_policy(x_true, x_s, P_s, x_hat_remote, P_remote, k):
-    if np.random.uniform(0, 1) < 0.3:
+    if np.random.uniform(0, 1) <= 1.0:
         return 1
     return 0

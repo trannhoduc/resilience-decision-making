@@ -19,9 +19,40 @@ dt = 1.0
 
 Delta = 5.0
 epsilon = 0.0
-T = 500
+T = 2000
 
 MU_W = np.zeros((A.shape[0], 1))   # process-noise mean in Assumption 1
-ALPHA_FN = 0.0005                    # temporary, change later
-ALPHA_FP = 0.0005                    # temporary, change later
+ALPHA_FN = 0.1                   # temporary, change later
+ALPHA_FP = 0.1                   # temporary, change later
 LOOKAHEAD_ELL = 5                  # temporary, change later
+
+XI_MODE = "optimal"   # "optimal", "delta", or "manual"
+XI_VALUE = None       # only used if XI_MODE == "manual"
+
+XI_WEIGHT_FP = 1.0
+XI_WEIGHT_FN = 1.0
+
+# Block length information
+
+BLOCKLENGTH_N = 128
+INFO_BITS_L = 64
+CHANNEL_NOISE_VAR = 1.0
+
+PT_MIN = 0.05
+PT_MAX = 5.0
+RHO = 5.0
+
+P_R = 0.05
+EPSILON_L = 0.05
+TH_RECOVERY_LAMBDA = 4.0
+TH_RECOVERY_KAPPA = 2.0
+
+THETA0_CANDIDATES = list(range(1, 9))
+THETA1_CANDIDATES = list(range(1, 9))
+
+NUM_I_MONTE_CARLO = 3000
+I_MONTE_CARLO_SEED = 42
+I_MONTE_CARLO_BURN_IN = 1000
+I_MONTE_CARLO_MAX_STEPS = 500000
+
+AVERAGE_EPSILON_METHOD = "closed_form"
