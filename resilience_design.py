@@ -105,12 +105,19 @@ def compute_average_packet_error_closed_form(
         raise ValueError("pt and noise_var must be positive.")
 
     gbar = pt / noise_var
-    phi = math.exp(l / n)
+    phi = math.exp(l / n) - 1.0
+    #print(f"phi: {phi}")
     beta = -math.sqrt(n / (2.0 * math.pi * (math.exp(2.0 * l / n) - 1.0)))
-    v = math.exp(-phi / gbar) - 1.0
+    v = math.exp(-phi / gbar)
 
     eps_bar = 1.0 + (beta * gbar - beta * gbar * math.exp(1.0 / (2.0 * beta * gbar)) - 0.5) * v
+    #print(f"esp bar: {eps_bar}")
     eps_bar = float(np.clip(eps_bar, 0.0, 1.0))
+
+    #print(f"beta: {beta}")
+    #print(f"gamma bar: {gbar}")
+    #print(f"v: {v}")
+    #print(f"esp bar: {eps_bar}")
 
     return {
         "pt": pt,
@@ -544,8 +551,8 @@ def estimate_predictive_horizon_moments(
         # run predictive detection only if this sojourn has not yet been detected
         if first_detection_time is None:
             pred = predictive_transition_detection(
-                x_hat=x_hat,
-                P=P,
+                x_hat_sensor=x_hat,
+                P_sensor=P,
                 A=A,
                 Q=Q,
                 c=c,
@@ -918,6 +925,18 @@ if __name__ == "__main__":
 
     derived = precompute_all(P)
     solution = solve_resilience_design(derived=derived, params=P)
+
+    #print("=== Quick epsilon-bar check ===")
+    #for pt in [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]:
+    #    avg = compute_average_packet_error(pt=pt, params=P)
+    #    print(f"pt={pt:.2f}, eps_bar={avg['eps_bar']:.6f}, method={avg['method']}")
+
+    #from collections import Counter
+
+    #reasons = Counter(c["reason"] for c in solution["candidates"])
+    #print("=== Candidate failure reasons ===")
+    #for k, v in reasons.items():
+    #    print(k, v)
 
     print("=== Resilience design summary ===")
     if not solution["feasible"]:
