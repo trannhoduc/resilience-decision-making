@@ -254,10 +254,14 @@ class PredictivePolicy:
 
         # whether a predictive packet for a future transition has already been sent
         self.pending_predictive_packet = False
+        self.predicted_transition_step = None
+        self.predicted_state = None
+        self.predicted_horizon = None
 
         # debug info
         self.last_prediction = None
         self.last_local_decision_info = None
+
 
     def current_sensor_decision(self, x_s, P_s, previous_decision):
         """
@@ -319,12 +323,13 @@ class PredictivePolicy:
         state_changed = (m_k != previous_decision)
         had_pending = self.pending_predictive_packet
 
+
         # -------------------------------------------------
         # Case 1:
         # A predictive packet was already sent, and the local decision
         # has not changed yet -> skip sending again
         # -------------------------------------------------
-        if had_pending and not state_changed:
+        if had_pending and k < self.predicted_transition_step:
             self.last_prediction = {
                 "found_transition": False,
                 "reason": "pending_predictive_packet_active_same_state",
@@ -338,37 +343,43 @@ class PredictivePolicy:
         # Then the old pending predictive packet, if any, has been consumed/realized.
         # So clear it immediately.
         # -------------------------------------------------
-        if state_changed:
+        if had_pending and k == self.predicted_transition_step:
             self.pending_predictive_packet = False
+            self.last_local_decision = self.predicted_state
+            self.last_prediction = {
+                "found_transition": True,
+                "reason": "predicted_transition",
+                "predicted_transition_time": k,
+                "predicted_horizon": self.predicted_horizon,
+                "decision_now": m_k,
+            }
 
-            # -------------------------------------------------
-            # Case 2a:
-            # No prior predictive packet existed for this change
-            # -> send immediately
-            # -------------------------------------------------
-            if not had_pending:
-                self.last_prediction = {
-                    "found_transition": True,
-                    "reason": "unpredicted_current_transition",
-                    "predicted_transition_time": 0,
-                    "predicted_horizon": 0,
-                    "decision_now": m_k,
-                }
+        # -------------------------------------------------
+        # Case 3:
+        # No prior predictive packet existed for this change
+        # -> send immediately
+        # -------------------------------------------------
+        if not had_pending and state_changed:
+            self.last_prediction = {
+                "found_transition": True,
+                "reason": "unpredicted_current_transition",
+                "predicted_transition_time": 0,
+                "predicted_horizon": 0,
+                "decision_now": m_k,
+            }
 
-                self.last_local_decision = m_k
-                return 1
+            self.last_local_decision = m_k
+            return 1
 
-            # -------------------------------------------------
-            # Case 2b:
-            # A predictive packet had already been sent for the old->new transition.
-            # Do NOT resend the current transition.
-            # Instead, continue from the NEW state and predict the NEXT transition.
-            # -------------------------------------------------
-            reference_decision = m_k
+        # -------------------------------------------------
+        # Case 4:
+        # No prior predictive packet existed
+        # And no changed
+        # -------------------------------------------------
+        if not had_pending and not state_changed:
+            pass
+            #reference_decision = m_k
 
-        else:
-            # state unchanged, no pending currently
-            reference_decision = previous_decision
 
         # -------------------------------------------------
         # Step 3:
@@ -388,14 +399,14 @@ class PredictivePolicy:
             Delta=self.Delta,
             alpha_fp=self.alpha_fp,
             alpha_fn=self.alpha_fn,
-            previous_decision=reference_decision,
+            previous_decision=self.last_local_decision,
             ell=self.ell,
+            xi=self.xi,
         )
         self.last_prediction = pred
 
         found = bool(pred.get("found_transition", False))
-        horizon = pred.get("predicted_horizon", pred.get("predicted_transition_time", None))
-
+        #
         transmit = 0
 
         if found:
@@ -404,18 +415,15 @@ class PredictivePolicy:
             # but logically this should be rare after the case split above.
             transmit = 1
 
-            if horizon is not None and horizon > 0:
-                self.pending_predictive_packet = True
-            else:
-                self.pending_predictive_packet = False
+            self.pending_predictive_packet = True
+            self.predicted_transition_step = k + int(pred["predicted_horizon"])
+            self.predicted_horizon = int(pred["predicted_horizon"])
+            self.predicted_state = pred["predicted_decision"]
         else:
             transmit = 0
             self.pending_predictive_packet = False
 
-        # -------------------------------------------------
-        # Update memory for next step
-        # -------------------------------------------------
-        self.last_local_decision = m_k
+
         return transmit
 
 def build_predictive_policy(A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi, initial_decision=0):

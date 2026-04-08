@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+#from ctypes import GetLastError
 from typing import Any, Dict, Mapping, Optional, Union
 
 import numpy as np
+from scipy.fft import ifftshift
 from scipy.linalg import solve, solve_discrete_lyapunov, solve_discrete_are
 from scipy.stats import multivariate_normal, norm
 from scipy.optimize import minimize_scalar
@@ -671,6 +673,7 @@ def predictive_transition_detection(
     P_sensor: ArrayLike,
     previous_decision: Optional[int],
     ell: int,
+    xi: float,
     A: ArrayLike,
     Q: ArrayLike,
     c: ArrayLike,
@@ -690,33 +693,26 @@ def predictive_transition_detection(
     if ell < 0:
         raise ValueError("ell must be nonnegative.")
 
-    current = evaluate_decision(
-        x_hat=x_hat_sensor,
-        P=P_sensor,
-        c=c,
-        Delta=Delta,
-        alpha_fp=alpha_fp,
-        alpha_fn=alpha_fn,
-        previous_decision=previous_decision,
-    )
 
-    current_pi = current["pi"]
+    # Có thể sai ở đây, vì predict đến step 9 chẳng hạn, nó ra confusion, đáng lẽ là drop nhưng vì nó khác ban đầu !!!
+    # Tương tự, ở khúc này có thể là confusion, predict hồi ra 0 hay 1 thì vẫn tính!!!!!
+    current_pi = int(float(c.T @ x_hat_sensor) >= xi)
     history = [
         {
             "offset": 0,
             "x_hat": _as_column(x_hat_sensor).copy(),
             "P": _as_array(P_sensor).copy(),
-            "decision": current,
+            "decision": current_pi,
         }
     ]
 
-    if current["region"] != "confusion" and current_pi != previous_decision:
-        return {
-            "found_transition": True,
-            "predicted_horizon": 0,
-            "predicted_decision": current_pi,
-            "path": history,
-        }
+    #if current["region"] != "confusion" and current_pi != previous_decision:
+    #    return {
+    #        "found_transition": True,
+    #        "predicted_horizon": 0,
+    #        "predicted_decision": current_pi,
+    #        "path": history,
+    #    }
 
     x_pred = _as_column(x_hat_sensor).copy()
     P_pred = _as_array(P_sensor).copy()
@@ -745,7 +741,15 @@ def predictive_transition_detection(
             }
         )
 
-        if decision_i["region"] != "confusion" and decision_i["pi"] != current_pi:
+        if decision_i["region"] == "confusion":
+            return {
+                "found_transition": False,
+                "predicted_horizon": None,
+                "predicted_decision": None,
+                "path": history,
+            }
+
+        if (decision_i["region"] != "confusion") and (decision_i["pi"] != current_pi):
             return {
                 "found_transition": True,
                 "predicted_horizon": i,

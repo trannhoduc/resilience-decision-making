@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+#from ctypes import GetLastError
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 import math
 import numpy as np
+from fontTools.ttLib.tables.otTables import DeltaSetIndexMap
+from scipy.fftpack import ifft2
 from scipy.optimize import minimize_scalar
 from scipy.special import erfc
+import matplotlib.pyplot as plt
 
 from computation import predictive_transition_detection, evaluate_decision
 
@@ -466,6 +470,7 @@ def _true_binary_state(x_true: np.ndarray, c: np.ndarray, Delta: float) -> int:
 
 def estimate_predictive_horizon_moments(
     params: ParamsLike,
+    derived: Dict[str, Any],
     num_transitions_per_state: Optional[int] = None,
     burn_in: Optional[int] = None,
     max_steps: Optional[int] = None,
@@ -494,6 +499,7 @@ def estimate_predictive_horizon_moments(
     alpha_fp = float(_get_param(params, "ALPHA_FP", 0.05))
     alpha_fn = float(_get_param(params, "ALPHA_FN", 0.05))
     ell = int(_get_param(params, "LOOKAHEAD_ELL", 5))
+    xi = float(derived["steady_state_benchmark"]["xi"])
 
     n = A.shape[0]
     seed = int(_get_param(params, "I_MONTE_CARLO_SEED", 42))
@@ -522,81 +528,136 @@ def estimate_predictive_horizon_moments(
     x_hat = _as_column(x_s0).copy()
     P = _as_array(P_s0).copy()
 
-    prev_reliable_decision = 1 if _scalar(c.T @ x_hat) >= Delta else 0
+    prev_reliable_decision = 1 if _scalar(c.T @ x_hat) >= xi else 0
 
     # burn in
     for _ in range(burn_in):
         x_true = _sample_true_process_step(x_true, A, Q, rng)
         y = _sample_measurement(x_true, C, R, rng)
         x_hat, P = _sensor_kf_update(x_hat, P, y, A, C, Q, R)
-        info = evaluate_decision(
-            x_hat=x_hat,
-            P=P,
-            c=c,
-            Delta=Delta,
-            alpha_fp=alpha_fp,
-            alpha_fn=alpha_fn,
-            previous_decision=prev_reliable_decision,
-        )
-        prev_reliable_decision = int(info["pi"])
 
+    # --------------------------------------------------------
+    # State / decision control
+    # --------------------------------------------------------
     I_0 = []
     I_1 = []
 
-    current_state = _true_binary_state(x_true, c, Delta)
-    first_detection_time = None
+    # sensor current decision using xi
+    prev_current_pi = 1 if _scalar(c.T @ x_hat) >= xi else 0
+
+    # predictive update control
+    prediction_active = False
+    predicted_transition_step = None
+    predicted_decision = None
+
     step_index = 0
 
     while (len(I_0) < num_transitions_per_state or len(I_1) < num_transitions_per_state) and step_index < max_steps:
-        # run predictive detection only if this sojourn has not yet been detected
-        if first_detection_time is None:
-            pred = predictive_transition_detection(
-                x_hat_sensor=x_hat,
-                P_sensor=P,
-                A=A,
-                Q=Q,
-                c=c,
-                Delta=Delta,
-                alpha_fp=alpha_fp,
-                alpha_fn=alpha_fn,
-                previous_decision=prev_reliable_decision,
-                ell=ell,
-            )
-            if bool(pred.get("found_transition", False)):
-                first_detection_time = step_index
-
-        # advance one sensor step
+        # ----------------------------------------------------
+        # 1) advance sensor one step
+        # ----------------------------------------------------
         x_true = _sample_true_process_step(x_true, A, Q, rng)
         y = _sample_measurement(x_true, C, R, rng)
         x_hat, P = _sensor_kf_update(x_hat, P, y, A, C, Q, R)
 
-        info = evaluate_decision(
-            x_hat=x_hat,
-            P=P,
+        # current decision based on xi
+        current_pi = 1 if _scalar(c.T @ x_hat) >= xi else 0
+
+        # ----------------------------------------------------
+        # 2) if a prediction is active:
+        #    - do nothing until predicted transition time
+        #    - at predicted time, flip the decision
+        #    - then allow new predictive detection again
+        # ----------------------------------------------------
+        if prediction_active:
+            if step_index < predicted_transition_step:
+                step_index += 1
+                continue
+
+            if step_index == predicted_transition_step:
+                # auto-switch at predicted time
+                prev_current_pi = predicted_decision
+                current_pi = predicted_decision
+
+                prediction_active = False
+                predicted_transition_step = None
+                predicted_decision = None
+
+                # after switching, try to detect a new transition immediately
+                pred = predictive_transition_detection(
+                    x_hat_sensor=x_hat,
+                    P_sensor=P,
+                    A=A,
+                    Q=Q,
+                    c=c,
+                    Delta=Delta,
+                    alpha_fp=alpha_fp,
+                    alpha_fn=alpha_fn,
+                    previous_decision=prev_current_pi,
+                    ell=ell,
+                    xi=xi,
+                )
+
+                if pred.get("found_transition") and pred.get("predicted_horizon") is not None:
+                    i = int(pred["predicted_horizon"])
+                    if i > 0:
+                        if prev_current_pi == 0:
+                            I_0.append(i)
+                        else:
+                            I_1.append(i)
+
+                        prediction_active = True
+                        predicted_transition_step = step_index + i
+                        predicted_decision = 1 - prev_current_pi
+
+                step_index += 1
+                continue
+
+        # ----------------------------------------------------
+        # 3) no active prediction:
+        #    - if current decision changed, record I = 0 for old decision
+        #    - update prev_current_pi
+        #    - then still run predictive_transition_detection
+        # ----------------------------------------------------
+        if current_pi != prev_current_pi:
+            if prev_current_pi == 0:
+                I_0.append(0)
+            else:
+                I_1.append(0)
+
+            prev_current_pi = current_pi
+
+        pred = predictive_transition_detection(
+            x_hat_sensor=x_hat,
+            P_sensor=P,
+            A=A,
+            Q=Q,
             c=c,
             Delta=Delta,
             alpha_fp=alpha_fp,
             alpha_fn=alpha_fn,
-            previous_decision=prev_reliable_decision,
+            previous_decision=prev_current_pi,
+            ell=ell,
+            xi=xi,
         )
-        prev_reliable_decision = int(info["pi"])
+
+        if pred.get("found_transition") and pred.get("predicted_horizon") is not None:
+            i = int(pred["predicted_horizon"])
+            if i > 0:
+                if prev_current_pi == 0:
+                    I_0.append(i)
+                else:
+                    I_1.append(i)
+
+                prediction_active = True
+                predicted_transition_step = step_index + i
+                predicted_decision = 1 - prev_current_pi
 
         step_index += 1
-        new_state = _true_binary_state(x_true, c, Delta)
 
-        if new_state != current_state:
-            # A true transition just happened at current step_index.
-            I_val = 0 if first_detection_time is None else max(step_index - first_detection_time, 0)
-
-            if current_state == 0 and len(I_0) < num_transitions_per_state:
-                I_0.append(I_val)
-            elif current_state == 1 and len(I_1) < num_transitions_per_state:
-                I_1.append(I_val)
-
-            current_state = new_state
-            first_detection_time = None
-
-    if len(I_0) == 0 or len(I_1) == 0:
+    print(I_1)
+    print(I_0)
+    if len(I_0) == 0 and len(I_1) == 0:
         raise RuntimeError(
             "Failed to collect predictive-horizon samples for both states. "
             "Increase NUM_I_MONTE_CARLO and/or I_MONTE_CARLO_MAX_STEPS."
@@ -862,7 +923,9 @@ def solve_resilience_design(
     q00 = float(derived["markov_surrogate"]["q00"])
     q11 = float(derived["markov_surrogate"]["q11"])
 
-    predictive_stats = estimate_predictive_horizon_moments(params=params)
+    xi = float(derived["steady_state_benchmark"]["xi"])
+
+    predictive_stats = estimate_predictive_horizon_moments(params=params, derived=derived)
     predictive_stats = add_q_power_moments_to_predictive_horizon_stats(
         predictive_stats=predictive_stats,
         q00=q00,
@@ -960,3 +1023,4 @@ if __name__ == "__main__":
         print(f"Gamma1             : {best['Gamma_1']:.6f}")
         print(f"average rate       : {best['average_rate']:.6f}")
         print(f"objective          : {best['objective']:.6f}")
+

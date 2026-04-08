@@ -91,7 +91,7 @@ if __name__ == "__main__":
         initial_decision=initial_decision,
     )
 
-    policy = probability_policy
+    #policy = probability_policy
 
     # -------------------------------------------------
     # Run simulation
