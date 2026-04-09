@@ -530,8 +530,12 @@ def simulate_system(sensor, estimator, T, transmission_policy):
     false_positive_rate = len(fp_idx) / num_negative_truth if num_negative_truth > 0 else 0.0
     false_negative_rate = len(fn_idx) / num_positive_truth if num_positive_truth > 0 else 0.0
 
+    valid_horizons = predicted_horizon_hist[~np.isnan(predicted_horizon_hist)]
+    avg_predicted_horizon = float(np.mean(valid_horizons)) if len(valid_horizons) > 0 else float("nan")
+
     print(f"False Positive Rate (FPR): {false_positive_rate:.4f}")
     print(f"False Negative Rate (FNR): {false_negative_rate:.4f}")
+    print(f"Avg Predicted Horizon:     {avg_predicted_horizon:.4f}")
     print(f"Total successful receptions: {np.sum(delta_hist)} / {T}")
     print(f"Total transmission attempts: {np.sum(transmit_hist)} / {T}")
 
@@ -546,6 +550,7 @@ def simulate_system(sensor, estimator, T, transmission_policy):
         "fn_idx": np.array(fn_idx),
         "fpr": false_positive_rate,
         "fnr": false_negative_rate,
+        "avg_predicted_horizon": avg_predicted_horizon,
         "z_hist": z_hist,
         "region_hist": region_hist,
         "predicted_horizon_hist": predicted_horizon_hist,
@@ -570,6 +575,7 @@ def plot_results(results, Delta):
 
     fpr = results["fpr"]
     fnr = results["fnr"]
+    avg_predicted_horizon = results.get("avg_predicted_horizon", float("nan"))
 
     # successful update: transmit=1 and delta=1
     success_idx = np.where(delta_hist == 1)[0]
@@ -613,7 +619,7 @@ def plot_results(results, Delta):
             label="False Negative" if i == 0 else ""
         )
 
-    textstr = f"FPR = {fpr:.4f}\nFNR = {fnr:.4f}"
+    textstr = f"FPR = {fpr:.4f}\nFNR = {fnr:.4f}\nAvg Predicted Horizon = {avg_predicted_horizon:.4f}"
     ax1.text(
         0.02, 0.98, textstr,
         transform=ax1.transAxes,
