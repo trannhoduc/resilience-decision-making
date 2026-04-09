@@ -89,14 +89,18 @@ if __name__ == "__main__":
         ell=lookahead_ell,
         xi=xi,
         initial_decision=initial_decision,
+        p_t=P_T,
     )
 
-    #policy = probability_policy
+    policy = ProbabilityPolicy(p=0.3, p_t=P_T)
 
     # -------------------------------------------------
     # Run simulation
     # -------------------------------------------------
-    results = simulate_system(sensor, estimator, T, policy)
+    results = simulate_system(sensor, estimator, T, policy,
+                              blocklength_n=BLOCKLENGTH_N,
+                              t_sym=T_SYM,
+                              p_t_default=P_T)
 
     print(f"Initial reliable decision = {initial_decision}")
     print(f"Initial decision region   = {initial_decision_info['region']}")

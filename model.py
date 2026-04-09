@@ -100,12 +100,14 @@ class RemoteEstimator:
         P_k     = delta_k * P_s_k + (1-delta_k) * (A P_{k-1} A^T + Q)
     """
 
-    def __init__(self, A, Q, c, Delta, epsilon, alpha_fp, alpha_fn, xi):
+    def __init__(self, A, Q, c, Delta, epsilon, alpha_fp, alpha_fn, xi, p_r_prime_1, p_r_prime_0):
         self.A = A
         self.Q = Q
         self.c = np.asarray(c, dtype=float).reshape(-1, 1)
         self.Delta = float(Delta)
         self.epsilon = float(epsilon)
+        self.p_r_prime_1 = float(p_r_prime_1)
+        self.p_r_prime_0 = float(p_r_prime_0)
 
         self.alpha_fp = float(alpha_fp)
         self.alpha_fn = float(alpha_fn)
@@ -130,15 +132,23 @@ class RemoteEstimator:
         value = float(self.c.T @ x)
         return 1 if value >= self.Delta else 0
 
-    def packet_success(self, transmit):
+    def packet_success(self, transmit, state):
         """
         If sensor decides not to transmit => delta = 0
         If sensor transmits => success with probability 1-epsilon
         """
         if transmit == 0:
             return 0
+        # Packet drop probability
+        transmit_success = np.random.rand() > self.epsilon
+        # Outage event happen probability
+        if state == 1:
+            outage_event = np.random.rand() > self.p_r_prime_1
+        if state == 0:
+            outage_event = np.random.rand() > self.p_r_prime_0
 
-        success = np.random.rand() > self.epsilon
+        success = transmit_success and not outage_event
+
         return 1 if success else 0
 
     def reliable_decision(self, x_hat=None, P=None):
@@ -238,7 +248,7 @@ class PredictivePolicy:
       to see whether a future transition within ell should be sent now.
     """
 
-    def __init__(self, A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi, initial_decision=0):
+    def __init__(self, A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi, initial_decision=0, p_t=20.0):
         self.A = A
         self.Q = Q
         self.c = np.asarray(c, dtype=float).reshape(-1, 1)
@@ -248,6 +258,7 @@ class PredictivePolicy:
         self.alpha_fp = float(alpha_fp)
         self.alpha_fn = float(alpha_fn)
         self.ell = int(ell)
+        self.p_t = float(p_t)
 
         # m_{k-1}
         self.last_local_decision = int(initial_decision)
@@ -426,7 +437,7 @@ class PredictivePolicy:
 
         return transmit
 
-def build_predictive_policy(A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi, initial_decision=0):
+def build_predictive_policy(A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi, initial_decision=0, p_t=20.0):
     return PredictivePolicy(
         A=A,
         Q=Q,
@@ -437,14 +448,19 @@ def build_predictive_policy(A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi, initial
         ell=ell,
         xi=xi,
         initial_decision=initial_decision,
+        p_t=p_t,
     )
 
-def simulate_system(sensor, estimator, T, transmission_policy):
+def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_sym, p_t_default=20.0):
     """
     Run the joint simulation.
 
     transmission_policy(...) must return 0 or 1.
+    Energy per transmission = blocklength_n * p_t * t_sym,
+    where p_t is read from the policy (falls back to p_t_default).
     """
+    p_t = float(getattr(transmission_policy, "p_t", p_t_default))
+    energy_per_tx = blocklength_n * p_t * t_sym
 
     true_values = []
     est_values = []
@@ -452,6 +468,7 @@ def simulate_system(sensor, estimator, T, transmission_policy):
     est_events = []
     transmit_hist = []
     delta_hist = []
+    energy_hist = []
 
     fp_idx = []
     fn_idx = []
@@ -496,6 +513,7 @@ def simulate_system(sensor, estimator, T, transmission_policy):
         est_events.append(est_event)
         transmit_hist.append(transmit)
         delta_hist.append(delta_k)
+        energy_hist.append(transmit * energy_per_tx)
 
         z_hist.append(float(decision_info["z"]))
         region_hist.append(decision_info["region"])
@@ -520,6 +538,7 @@ def simulate_system(sensor, estimator, T, transmission_policy):
     est_events = np.array(est_events)
     transmit_hist = np.array(transmit_hist)
     delta_hist = np.array(delta_hist)
+    energy_hist = np.array(energy_hist)
     z_hist = np.array(z_hist)
     predicted_horizon_hist = np.array(predicted_horizon_hist)
 
@@ -533,9 +552,14 @@ def simulate_system(sensor, estimator, T, transmission_policy):
     valid_horizons = predicted_horizon_hist[~np.isnan(predicted_horizon_hist)]
     avg_predicted_horizon = float(np.mean(valid_horizons)) if len(valid_horizons) > 0 else float("nan")
 
+    total_energy = float(np.sum(energy_hist))
+    avg_energy = total_energy / T
+
     print(f"False Positive Rate (FPR): {false_positive_rate:.4f}")
     print(f"False Negative Rate (FNR): {false_negative_rate:.4f}")
     print(f"Avg Predicted Horizon:     {avg_predicted_horizon:.4f}")
+    print(f"Total Energy Consumption:  {total_energy:.6e} J")
+    print(f"Avg Energy per Step:       {avg_energy:.6e} J")
     print(f"Total successful receptions: {np.sum(delta_hist)} / {T}")
     print(f"Total transmission attempts: {np.sum(transmit_hist)} / {T}")
 
@@ -546,11 +570,14 @@ def simulate_system(sensor, estimator, T, transmission_policy):
         "est_events": est_events,
         "transmit_hist": transmit_hist,
         "delta_hist": delta_hist,
+        "energy_hist": energy_hist,
         "fp_idx": np.array(fp_idx),
         "fn_idx": np.array(fn_idx),
         "fpr": false_positive_rate,
         "fnr": false_negative_rate,
         "avg_predicted_horizon": avg_predicted_horizon,
+        "total_energy": total_energy,
+        "avg_energy": avg_energy,
         "z_hist": z_hist,
         "region_hist": region_hist,
         "predicted_horizon_hist": predicted_horizon_hist,
@@ -576,6 +603,8 @@ def plot_results(results, Delta):
     fpr = results["fpr"]
     fnr = results["fnr"]
     avg_predicted_horizon = results.get("avg_predicted_horizon", float("nan"))
+    total_energy = results.get("total_energy", float("nan"))
+    avg_energy = results.get("avg_energy", float("nan"))
 
     # successful update: transmit=1 and delta=1
     success_idx = np.where(delta_hist == 1)[0]
@@ -619,7 +648,13 @@ def plot_results(results, Delta):
             label="False Negative" if i == 0 else ""
         )
 
-    textstr = f"FPR = {fpr:.4f}\nFNR = {fnr:.4f}\nAvg Predicted Horizon = {avg_predicted_horizon:.4f}"
+    textstr = (
+        f"FPR = {fpr:.4f}\n"
+        f"FNR = {fnr:.4f}\n"
+        f"Avg Predicted Horizon = {avg_predicted_horizon:.4f}\n"
+        f"Total Energy = {total_energy:.4e} J\n"
+        f"Avg Energy/Step = {avg_energy:.4e} J"
+    )
     ax1.text(
         0.02, 0.98, textstr,
         transform=ax1.transAxes,
@@ -667,7 +702,15 @@ def plot_results(results, Delta):
     plt.tight_layout()
     plt.show()
 
-def probability_policy(x_true, x_s, P_s, x_hat_remote, P_remote, k):
-    if np.random.uniform(0, 1) <= 1.0:
-        return 1
-    return 0
+class ProbabilityPolicy:
+    """
+    Random transmission policy: transmit with probability p at each step.
+    """
+
+    def __init__(self, p=1.0, p_t=20.0):
+        self.p = float(p)
+        self.p_t = float(p_t)
+        self.last_prediction = None
+
+    def __call__(self, x_true, x_s, P_s, x_hat_remote, P_remote, k):
+        return 1 if np.random.uniform(0, 1) <= self.p else 0
