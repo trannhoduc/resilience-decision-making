@@ -141,6 +141,9 @@ class RemoteEstimator:
         self._disruption_detected = False
         self._recovery_end_k = None
 
+        # Last reception indicator (1 = packet received, 0 = not received)
+        self.delta_k = 0
+
     def init_value(self, x_hat0, P0):
         self.x_hat = np.asarray(x_hat0, dtype=float).reshape(-1, 1)
         self.P = np.asarray(P0, dtype=float)
@@ -287,6 +290,7 @@ class RemoteEstimator:
         # Reception (disruption blocks regardless of channel or transmit)
         # ------------------------------------------------------------------
         delta_k = self.packet_success(transmit)
+        self.delta_k = delta_k
 
         # ------------------------------------------------------------------
         # Estimator update
@@ -556,6 +560,179 @@ def build_predictive_policy(A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi, initial
         p_t=p_t,
     )
 
+
+class ResilientPredictivePolicy(PredictivePolicy):
+    """
+    Resilient extension of PredictivePolicy.
+
+    Identical to PredictivePolicy in all cases EXCEPT:
+
+    1. At a state transition (state_changed = True):
+         - Pending predictive packet already sent  -> consume it silently, no send.
+         - No pending predictive packet            -> also do NOT send (resilience skipped
+           at transition time; the probabilistic updates should have kept the estimator
+           informed between transitions).
+
+    2. When there is NO transition AND no new predictive update is triggered:
+         -> send with probability p_u,s* where s = current local state
+            (p_u0 for state 0, p_u1 for state 1).
+            p_u0* and p_u1* are computed by compute_pu_star() in resilience_design.py.
+
+    The probabilistic "resilience" send is therefore:
+      - Active  : steady-state steps with no predictive trigger.
+      - Inactive: any step where the local decision has just changed.
+    """
+
+    def __init__(self, A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi,
+                 p_u0, p_u1, initial_decision=0, p_t=20.0):
+        super().__init__(A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi,
+                         initial_decision=initial_decision, p_t=p_t)
+        self.p_u0 = float(p_u0)
+        self.p_u1 = float(p_u1)
+
+    def __call__(self, x_true, x_s, P_s, x_hat_remote, P_remote, k):
+        previous_decision = self.last_local_decision
+
+        local_info = self.current_sensor_decision(x_s, P_s, previous_decision)
+        m_k = int(local_info["pi"])
+        self.last_local_decision_info = local_info
+
+        state_changed = (m_k != previous_decision)
+        had_pending = self.pending_predictive_packet
+
+        # ------------------------------------------------------------------
+        # Case 1: pending packet active, no transition yet -> silent
+        # ------------------------------------------------------------------
+        if had_pending and k < self.predicted_transition_step:
+            self.last_prediction = {
+                "found_transition": False,
+                "reason": "pending_predictive_packet_active_same_state",
+                "predicted_transition_time": None,
+            }
+            return 0
+
+        # ------------------------------------------------------------------
+        # Case 2: pending packet realized at this transition step
+        # -> consume silently (estimator was pre-informed by predictive packet)
+        # ------------------------------------------------------------------
+        if had_pending and k == self.predicted_transition_step:
+            self.pending_predictive_packet = False
+            self.last_local_decision = self.predicted_state
+            self.last_prediction = {
+                "found_transition": True,
+                "reason": "predicted_transition",
+                "predicted_transition_time": k,
+                "predicted_horizon": self.predicted_horizon,
+                "decision_now": m_k,
+            }
+
+        # ------------------------------------------------------------------
+        # Case 3: unpredicted transition (no pending packet, state just changed)
+        # KEY DIFFERENCE vs PredictivePolicy: do NOT send; skip resilience at
+        # transition time.
+        # ------------------------------------------------------------------
+        if not had_pending and state_changed:
+            self.last_local_decision = m_k
+            self.last_prediction = {
+                "found_transition": True,
+                "reason": "unpredicted_current_transition_resilient_skip",
+                "predicted_transition_time": 0,
+                "predicted_horizon": 0,
+                "decision_now": m_k,
+            }
+            return 0
+
+        # ------------------------------------------------------------------
+        # Step: run predictive transition detection for the next transition.
+        # Reaches here from Case 2 fall-through or Case 4 (no change, no pending).
+        # ------------------------------------------------------------------
+        pred = predictive_transition_detection(
+            x_hat_sensor=x_s,
+            P_sensor=P_s,
+            A=self.A,
+            Q=self.Q,
+            c=self.c,
+            Delta=self.Delta,
+            alpha_fp=self.alpha_fp,
+            alpha_fn=self.alpha_fn,
+            previous_decision=self.last_local_decision,
+            ell=self.ell,
+            xi=self.xi,
+        )
+        self.last_prediction = pred
+
+        found = bool(pred.get("found_transition", False))
+
+        if found:
+            # Predictive update found -> send (same as PredictivePolicy)
+            self.pending_predictive_packet = True
+            self.predicted_transition_step = k + int(pred["predicted_horizon"])
+            self.predicted_horizon = int(pred["predicted_horizon"])
+            self.predicted_state = pred["predicted_decision"]
+            return 1
+
+        # ------------------------------------------------------------------
+        # No predictive update found.
+        # - If this step is a transition (Case 2 fall-through, state_changed=True)
+        #   -> resilience is skipped; return 0.
+        # - Otherwise (steady state, no transition)
+        #   -> send with probability p_u,s* for the current local state.
+        # ------------------------------------------------------------------
+        self.pending_predictive_packet = False
+
+        if not state_changed:
+            p_u = self.p_u0 if self.last_local_decision == 0 else self.p_u1
+            if np.random.rand() < p_u:
+                return 1
+
+        return 0
+
+
+def build_resilient_predictive_policy(A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi,
+                                      p_u0, p_u1, initial_decision=0, p_t=20.0):
+    return ResilientPredictivePolicy(
+        A=A,
+        Q=Q,
+        c=c,
+        Delta=Delta,
+        alpha_fp=alpha_fp,
+        alpha_fn=alpha_fn,
+        ell=ell,
+        xi=xi,
+        p_u0=p_u0,
+        p_u1=p_u1,
+        initial_decision=initial_decision,
+        p_t=p_t,
+    )
+
+
+# Supported policy_type values:
+#   "predictive"            -> PredictivePolicy
+#   "resilient_predictive"  -> ResilientPredictivePolicy  (requires p_u0, p_u1)
+#   "probability"           -> ProbabilityPolicy          (requires p_prob)
+def build_policy(policy_type, A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi,
+                 initial_decision=0, p_t=20.0, p_u0=0.0, p_u1=0.0, p_prob=1.0):
+    if policy_type == "predictive":
+        return build_predictive_policy(
+            A=A, Q=Q, c=c, Delta=Delta,
+            alpha_fp=alpha_fp, alpha_fn=alpha_fn,
+            ell=ell, xi=xi,
+            initial_decision=initial_decision, p_t=p_t,
+        )
+    if policy_type == "resilient_predictive":
+        return build_resilient_predictive_policy(
+            A=A, Q=Q, c=c, Delta=Delta,
+            alpha_fp=alpha_fp, alpha_fn=alpha_fn,
+            ell=ell, xi=xi,
+            p_u0=p_u0, p_u1=p_u1,
+            initial_decision=initial_decision, p_t=p_t,
+        )
+    if policy_type == "probability":
+        return ProbabilityPolicy(p=p_prob, p_t=p_t)
+    raise ValueError(f"Unknown policy_type '{policy_type}'. "
+                     f"Choose 'predictive', 'resilient_predictive', or 'probability'.")
+
+
 def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_sym, p_t_default=20.0):
     """
     Run the joint simulation.
@@ -628,12 +805,14 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
         z_hist.append(float(decision_info["z"]))
         region_hist.append(decision_info["region"])
 
+        # Record predicted horizon only when the estimator received the packet.
+        # This reflects how far in advance the estimator was warned about each transition.
         pred_info = getattr(transmission_policy, "last_prediction", None)
-        if pred_info is None:
-            predicted_horizon_hist.append(np.nan)
-        else:
+        if delta_k == 1 and pred_info is not None:
             horizon = pred_info.get("predicted_horizon", pred_info.get("predicted_transition_time", None))
             predicted_horizon_hist.append(np.nan if horizon is None else float(horizon))
+        else:
+            predicted_horizon_hist.append(np.nan)
 
         # Error bookkeeping
         if est_event == 1 and true_event == 0:
@@ -660,8 +839,11 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
     false_positive_rate = len(fp_idx) / num_negative_truth if num_negative_truth > 0 else 0.0
     false_negative_rate = len(fn_idx) / num_positive_truth if num_positive_truth > 0 else 0.0
 
-    valid_horizons = predicted_horizon_hist[~np.isnan(predicted_horizon_hist)]
-    avg_predicted_horizon = float(np.mean(valid_horizons)) if len(valid_horizons) > 0 else float("nan")
+    # Average predicted horizon = total horizon received by estimator / number of state transitions.
+    # A transition is counted each time the estimated decision changes.
+    num_transitions = int(np.sum(np.abs(np.diff(est_events))))
+    horizon_sum = float(np.nansum(predicted_horizon_hist))
+    avg_predicted_horizon = horizon_sum / num_transitions if num_transitions > 0 else float("nan")
 
     total_energy = float(np.sum(energy_hist))
     avg_energy = total_energy / T

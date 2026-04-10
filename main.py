@@ -39,18 +39,23 @@ if __name__ == "__main__":
     xi = derived["steady_state_benchmark"]["xi"]
 
     # ------------------------------------------------------------------
-    # Resilience design: solve for optimal theta_0, theta_1
+    # Resilience design: solve for optimal theta_0, theta_1, p_u0*, p_u1*
     # ------------------------------------------------------------------
     solution = solve_resilience_design(derived=derived, params=P)
     if solution["feasible"]:
         best_design = solution["best_design"]
         theta_0 = int(best_design["theta0"])
         theta_1 = int(best_design["theta1"])
+        pu0 = float(best_design["pu0_star"])
+        pu1 = float(best_design["pu1_star"])
         print(f"Resilience design: theta_0={theta_0}, theta_1={theta_1}, "
               f"eps_r={best_design['eps_r']:.4f}, objective={best_design['objective']:.4f}")
+        print(f"  p_u0* = {pu0:.4f},  p_u1* = {pu1:.4f}")
     else:
         theta_0 = 5
         theta_1 = 5
+        pu0 = 0.0
+        pu1 = 0.0
         print("WARNING: No feasible resilience design found. Using defaults theta_0=5, theta_1=5.")
 
     q01 = float(derived["markov_surrogate"]["q01"])
@@ -101,11 +106,15 @@ if __name__ == "__main__":
     estimator.last_decision = initial_decision
 
     # -------------------------------------------------
-    # Build predictive-only policy
-    # No resilience update here yet
+    # Policy selection — change POLICY_TYPE to switch:
+    #   "predictive"           -> PredictivePolicy (no resilience updates)
+    #   "resilient_predictive" -> ResilientPredictivePolicy (probabilistic resilience updates)
+    #   "probability"          -> ProbabilityPolicy (transmit with fixed probability p_prob)
     # -------------------------------------------------
+    POLICY_TYPE = "probability"
 
-    policy = build_predictive_policy(
+    policy = build_policy(
+        policy_type=POLICY_TYPE,
         A=A,
         Q=Q,
         c=c,
@@ -116,9 +125,10 @@ if __name__ == "__main__":
         xi=xi,
         initial_decision=initial_decision,
         p_t=P_T,
+        p_u0=pu0,
+        p_u1=pu1,
+        p_prob=0.3,   # used only for "probability" policy
     )
-
-    #policy = ProbabilityPolicy(p=0.3, p_t=P_T)
 
     # -------------------------------------------------
     # Run simulation

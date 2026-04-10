@@ -20,9 +20,9 @@ dt = 1.0                               # Sampling time
 # SIMULATION
 # =============================================================================
 
-T       = 10000                         # Total simulation steps
+T       = 4000                         # Total simulation steps
 Delta   = 5.0                          # Disruption magnitude
-epsilon = 0.0                          # Perturbation parameter
+epsilon = 0.01                          # Perturbation parameter
 
 MU_W = np.zeros((A.shape[0], 1))       # Process-noise mean (Assumption 1)
 
