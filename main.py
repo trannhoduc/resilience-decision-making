@@ -1,6 +1,7 @@
 from PARAMETERS import *
 from model import *
 from computation import evaluate_decision, precompute_all
+from resilience_design import solve_resilience_design
 
 
 if __name__ == "__main__":
@@ -37,6 +38,24 @@ if __name__ == "__main__":
     derived = precompute_all(P)
     xi = derived["steady_state_benchmark"]["xi"]
 
+    # ------------------------------------------------------------------
+    # Resilience design: solve for optimal theta_0, theta_1
+    # ------------------------------------------------------------------
+    solution = solve_resilience_design(derived=derived, params=P)
+    if solution["feasible"]:
+        best_design = solution["best_design"]
+        theta_0 = int(best_design["theta0"])
+        theta_1 = int(best_design["theta1"])
+        print(f"Resilience design: theta_0={theta_0}, theta_1={theta_1}, "
+              f"eps_r={best_design['eps_r']:.4f}, objective={best_design['objective']:.4f}")
+    else:
+        theta_0 = 5
+        theta_1 = 5
+        print("WARNING: No feasible resilience design found. Using defaults theta_0=5, theta_1=5.")
+
+    q01 = float(derived["markov_surrogate"]["q01"])
+    q10 = float(derived["markov_surrogate"]["q10"])
+
     estimator = RemoteEstimator(
         A=A,
         Q=Q,
@@ -46,6 +65,13 @@ if __name__ == "__main__":
         alpha_fp=alpha_fp,
         alpha_fn=alpha_fn,
         xi=xi,
+        q01=q01,
+        q10=q10,
+        p_r=P_R,
+        theta_0=theta_0,
+        theta_1=theta_1,
+        weibull_lambda=TH_RECOVERY_LAMBDA,
+        weibull_kappa=TH_RECOVERY_KAPPA,
     )
     estimator.init_value(x_hat0, P0)
 
@@ -92,7 +118,7 @@ if __name__ == "__main__":
         p_t=P_T,
     )
 
-    policy = ProbabilityPolicy(p=0.3, p_t=P_T)
+    #policy = ProbabilityPolicy(p=0.3, p_t=P_T)
 
     # -------------------------------------------------
     # Run simulation

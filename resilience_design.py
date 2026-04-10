@@ -655,8 +655,6 @@ def estimate_predictive_horizon_moments(
 
         step_index += 1
 
-    print(I_1)
-    print(I_0)
     if len(I_0) == 0 and len(I_1) == 0:
         raise RuntimeError(
             "Failed to collect predictive-horizon samples for both states. "
