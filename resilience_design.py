@@ -71,7 +71,7 @@ def compute_instantaneous_packet_error(gamma: float, n: int, l: int) -> float:
     if gamma <= 1e-14:
         return 1.0
 
-    C_gamma = math.log(1.0 + gamma)
+    C_gamma = math.log2(1.0 + gamma)
     V_gamma = 1.0 - (1.0 + gamma) ** (-2.0)
 
     if V_gamma <= 1e-14:
@@ -168,7 +168,6 @@ def compute_average_packet_error_monte_carlo(
         "num_samples": num_samples,
         "eps_bar": float(np.mean(eps)),
     }
-
 
 
 def compute_average_packet_error(pt: float, params: ParamsLike, method: Optional[str] = None) -> Dict[str, float]:
@@ -872,7 +871,7 @@ def evaluate_resilience_design(
         q01=q01,
         q10=q10,
     )
-    J = compute_energy_objective(pt=pt, n=n, average_rate=avg_rate)
+    J = compute_energy_objective(pt=pt, n=1, average_rate=avg_rate)
 
     return {
         "feasible": True,

@@ -2,6 +2,7 @@ import math
 import numpy as np
 import matplotlib.pyplot as plt
 from computation import evaluate_decision, predictive_transition_detection
+from resilience_design import compute_instantaneous_packet_error
 
 class Model:
     """
@@ -87,7 +88,6 @@ class Model:
         x_s, P_s = self.local_kf_step(y_k)
         return x_true, y_k, x_s, P_s
 
-
 class RemoteEstimator:
     """
     Remote estimator:
@@ -101,14 +101,17 @@ class RemoteEstimator:
         P_k     = delta_k * P_s_k + (1-delta_k) * (A P_{k-1} A^T + Q)
     """
 
-    def __init__(self, A, Q, c, Delta, epsilon, alpha_fp, alpha_fn, xi,
+    def __init__(self, A, Q, c, Delta, noise_var, blocklength_n, info_bits_l,
+                 alpha_fp, alpha_fn, xi,
                  q01=0.0, q10=0.0, p_r=0.0, theta_0=5, theta_1=5,
                  weibull_lambda=4.0, weibull_kappa=2.0):
         self.A = A
         self.Q = Q
         self.c = np.asarray(c, dtype=float).reshape(-1, 1)
         self.Delta = float(Delta)
-        self.epsilon = float(epsilon)
+        self.noise_var = float(noise_var)
+        self.blocklength_n = int(blocklength_n)
+        self.info_bits_l = int(info_bits_l)
 
         self.alpha_fp = float(alpha_fp)
         self.alpha_fn = float(alpha_fn)
@@ -187,17 +190,22 @@ class RemoteEstimator:
         value = float(self.c.T @ x)
         return 1 if value >= self.Delta else 0
 
-    def packet_success(self, transmit):
+    def packet_success(self, transmit, p_t):
         """
         If sensor decides not to transmit => delta = 0.
         If a disruption is active => delta = 0 (outage blocks all receptions).
-        Otherwise: success with probability 1 - epsilon.
+        Otherwise: draw h2 ~ Exp(1), compute instantaneous SNR gamma = h2 * gbar
+        (gbar = p_t / noise_var), and succeed with probability 1 - epsilon_k.
         """
         if transmit == 0:
             return 0
         if self._disruption_active:
             return 0
-        success = np.random.rand() > self.epsilon
+        h2 = np.random.exponential(scale=1.0)
+        gbar = p_t / self.noise_var
+        gamma = h2 * gbar
+        eps_k = compute_instantaneous_packet_error(gamma, self.blocklength_n, self.info_bits_l)
+        success = np.random.rand() > eps_k
         return 1 if success else 0
 
     def reliable_decision(self, x_hat=None, P=None):
@@ -253,12 +261,13 @@ class RemoteEstimator:
 
         return info
 
-    def step(self, x_s, P_s, transmit, k):
+    def step(self, x_s, P_s, transmit, k, p_t=1.0):
         """
         Remote estimator update at time step k.
 
         transmit : sensor transmission decision (0 or 1)
         k        : current time index (used for recovery scheduling)
+        p_t      : transmit power used by the sensor this step (determines instantaneous PER)
 
         Disruption / AoI / recovery logic:
           - Each step: if no disruption has occurred yet this sojourn, roll
@@ -289,7 +298,7 @@ class RemoteEstimator:
         # ------------------------------------------------------------------
         # Reception (disruption blocks regardless of channel or transmit)
         # ------------------------------------------------------------------
-        delta_k = self.packet_success(transmit)
+        delta_k = self.packet_success(transmit, p_t)
         self.delta_k = delta_k
 
         # ------------------------------------------------------------------
@@ -560,7 +569,6 @@ def build_predictive_policy(A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi, initial
         p_t=p_t,
     )
 
-
 class ResilientPredictivePolicy(PredictivePolicy):
     """
     Resilient extension of PredictivePolicy.
@@ -687,7 +695,6 @@ class ResilientPredictivePolicy(PredictivePolicy):
 
         return 0
 
-
 def build_resilient_predictive_policy(A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi,
                                       p_u0, p_u1, initial_decision=0, p_t=20.0):
     return ResilientPredictivePolicy(
@@ -705,11 +712,11 @@ def build_resilient_predictive_policy(A, Q, c, Delta, alpha_fp, alpha_fn, ell, x
         p_t=p_t,
     )
 
-
 # Supported policy_type values:
 #   "predictive"            -> PredictivePolicy
 #   "resilient_predictive"  -> ResilientPredictivePolicy  (requires p_u0, p_u1)
 #   "probability"           -> ProbabilityPolicy          (requires p_prob)
+#   "event_trigger"         -> EventTriggerPolicy         (transmit only on decision transition)
 def build_policy(policy_type, A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi,
                  initial_decision=0, p_t=20.0, p_u0=0.0, p_u1=0.0, p_prob=1.0):
     if policy_type == "predictive":
@@ -729,9 +736,15 @@ def build_policy(policy_type, A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi,
         )
     if policy_type == "probability":
         return ProbabilityPolicy(p=p_prob, p_t=p_t)
+    if policy_type == "event_trigger":
+        return build_event_trigger_policy(
+            c=c, Delta=Delta,
+            alpha_fp=alpha_fp, alpha_fn=alpha_fn,
+            xi=xi,
+            initial_decision=initial_decision, p_t=p_t,
+        )
     raise ValueError(f"Unknown policy_type '{policy_type}'. "
-                     f"Choose 'predictive', 'resilient_predictive', or 'probability'.")
-
+                     f"Choose 'predictive', 'resilient_predictive', 'probability', or 'event_trigger'.")
 
 def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_sym, p_t_default=20.0):
     """
@@ -783,7 +796,8 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
             x_s=x_s,
             P_s=P_s,
             transmit=transmit,
-            k=k
+            k=k,
+            p_t=p_t,
         )
 
         # True event
@@ -1033,3 +1047,75 @@ class ProbabilityPolicy:
 
     def __call__(self, x_true, x_s, P_s, x_hat_remote, P_remote, k):
         return 1 if np.random.uniform(0, 1) <= self.p else 0
+
+class EventTriggerPolicy:
+    """
+    Event-triggered transmission policy.
+
+    The sensor only transmits when its local decision undergoes a transition
+    (0->1 or 1->0). No packet is sent during steady-state steps.
+
+    The local decision is computed with the same feasible-decision rule used by
+    the other policies: reliable outside the confusion region, xi-based inside.
+    """
+
+    def __init__(self, c, Delta, alpha_fp, alpha_fn, xi, initial_decision=0, p_t=20.0):
+        self.c = np.asarray(c, dtype=float).reshape(-1, 1)
+        self.Delta = float(Delta)
+        self.alpha_fp = float(alpha_fp)
+        self.alpha_fn = float(alpha_fn)
+        self.xi = float(xi)
+        self.p_t = float(p_t)
+
+        self.last_local_decision = int(initial_decision)
+        self.last_prediction = None  # for interface compatibility with simulate_system
+
+    def _current_sensor_decision(self, x_s, P_s):
+        info = evaluate_decision(
+            x_hat=x_s,
+            P=P_s,
+            c=self.c,
+            Delta=self.Delta,
+            alpha_fp=self.alpha_fp,
+            alpha_fn=self.alpha_fn,
+            previous_decision=self.last_local_decision,
+        )
+        if info["region"] == "confusion":
+            s_hat = float((self.c.T @ x_s).item())
+            info["pi"] = 1 if s_hat >= self.xi else 0
+            info["used_xi_inside_confusion"] = True
+        else:
+            info["used_xi_inside_confusion"] = False
+        return info
+
+    def __call__(self, x_true, x_s, P_s, x_hat_remote, P_remote, k):
+        local_info = self._current_sensor_decision(x_s, P_s)
+        m_k = int(local_info["pi"])
+
+        if m_k != self.last_local_decision:
+            self.last_local_decision = m_k
+            self.last_prediction = {
+                "found_transition": True,
+                "reason": "event_trigger_transition",
+                "predicted_horizon": 0,
+                "decision_now": m_k,
+            }
+            return 1
+
+        self.last_prediction = {
+            "found_transition": False,
+            "reason": "no_transition",
+            "predicted_horizon": None,
+        }
+        return 0
+
+def build_event_trigger_policy(c, Delta, alpha_fp, alpha_fn, xi, initial_decision=0, p_t=20.0):
+    return EventTriggerPolicy(
+        c=c,
+        Delta=Delta,
+        alpha_fp=alpha_fp,
+        alpha_fn=alpha_fn,
+        xi=xi,
+        initial_decision=initial_decision,
+        p_t=p_t,
+    )
