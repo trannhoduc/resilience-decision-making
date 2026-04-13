@@ -113,34 +113,18 @@ if __name__ == "__main__":
     q01 = float(derived["markov_surrogate"]["q01"])
     q10 = float(derived["markov_surrogate"]["q10"])
 
-    estimator = RemoteEstimator(
-        A=A,
-        Q=Q,
-        c=c,
-        Delta=Delta,
-        noise_var=float(P.CHANNEL_NOISE_VAR),
-        blocklength_n=int(P.BLOCKLENGTH_N),
-        info_bits_l=int(P.INFO_BITS_L),
-        alpha_fp=alpha_fp,
-        alpha_fn=alpha_fn,
-        xi=xi,
-        q01=q01,
-        q10=q10,
-        p_r=P_R,
-        theta_0=theta_0,
-        theta_1=theta_1,
-        weibull_lambda=TH_RECOVERY_LAMBDA,
-        weibull_kappa=TH_RECOVERY_KAPPA,
-    )
-    estimator.init_value(x_hat0, P0)
+    # -------------------------------------------------
+    # Pre-generate shared environment sequences (seed already set above).
+    # All policies will see the same process evolution, sensor measurements,
+    # channel gains h2, and disruption onset draws.
+    # Recovery duration is NOT controlled here (detection time differs per policy).
+    # -------------------------------------------------
+    n_state = A.shape[0]
+    m_obs   = C.shape[0]
+    env_seq = generate_env_sequences(T, n_state, m_obs, Q, R)
 
     # -------------------------------------------------
-    # Initialize the first reliable decision from the SENSOR posterior
-    # This is better than blindly using estimator.last_decision,
-    # because predictive scheduling in the paper is sensor-driven.
-    #
-    # We still need a fallback previous_decision for the very first call.
-    # For that fallback only, use a simple hard threshold on x_s0.
+    # Compute the initial decision once (same for all policies).
     # -------------------------------------------------
     s0_value = (np.asarray(c).reshape(1, -1) @ np.asarray(x_s0).reshape(-1, 1)).item()
     fallback_initial_decision = 1 if s0_value >= Delta else 0
@@ -156,50 +140,73 @@ if __name__ == "__main__":
     )
     initial_decision = int(initial_decision_info["pi"])
 
-    # Keep estimator and policy synchronized at time 0
-    estimator.last_decision = initial_decision
-
-    # -------------------------------------------------
-    # Policy selection — change POLICY_TYPE to switch:
-    #   "predictive"           -> PredictivePolicy (no resilience updates)
-    #   "resilient_predictive" -> ResilientPredictivePolicy (probabilistic resilience updates)
-    #   "probability"          -> ProbabilityPolicy (transmit with fixed probability p_prob)
-    #   "event_trigger"        -> EventTriggerPolicy (transmit only on decision transition)
-    # -------------------------------------------------
-    POLICY_TYPE = "resilient_predictive"
-
-    p_t_for_policy = policy_p_t[POLICY_TYPE]
-
-    policy = build_policy(
-        policy_type=POLICY_TYPE,
-        A=A,
-        Q=Q,
-        c=c,
-        Delta=Delta,
-        alpha_fp=alpha_fp,
-        alpha_fn=alpha_fn,
-        ell=lookahead_ell,
-        xi=xi,
-        initial_decision=initial_decision,
-        p_t=p_t_for_policy,
-        p_u0=pu0,
-        p_u1=pu1,
-        p_prob=p_prob_calibrated,   # energy-calibrated; used only for "probability" policy
-    )
-
-    print(f"\nRunning policy '{POLICY_TYPE}' with p_t = {p_t_for_policy:.4f}"
-          + (f", p_prob = {p_prob_calibrated:.4f}" if POLICY_TYPE == "probability" else ""))
-
-    # -------------------------------------------------
-    # Run simulation
-    # -------------------------------------------------
-    results = simulate_system(sensor, estimator, T, policy,
-                              blocklength_n=BLOCKLENGTH_N,
-                              t_sym=T_SYM,
-                              p_t_default=p_t_for_policy)
-
     print(f"Initial reliable decision = {initial_decision}")
     print(f"Initial decision region   = {initial_decision_info['region']}")
     print(f"Initial z-value           = {initial_decision_info['z']:.4f}")
 
-    plot_results(results, Delta)
+    # -------------------------------------------------
+    # Run all four policies over the same environment.
+    # Sensor and estimator are reset before each policy run.
+    # -------------------------------------------------
+    all_results = {}
+
+    for POLICY_TYPE in ["resilient_predictive", "predictive", "event_trigger", "probability"]:
+
+        # Reset sensor state
+        sensor = Model(A, C, Q, R)
+        sensor.init_value(x_true0, x_s0, P_s0)
+
+        # Reset estimator state
+        estimator = RemoteEstimator(
+            A=A,
+            Q=Q,
+            c=c,
+            Delta=Delta,
+            noise_var=float(P.CHANNEL_NOISE_VAR),
+            blocklength_n=int(P.BLOCKLENGTH_N),
+            info_bits_l=int(P.INFO_BITS_L),
+            alpha_fp=alpha_fp,
+            alpha_fn=alpha_fn,
+            xi=xi,
+            q01=q01,
+            q10=q10,
+            p_r=P_R,
+            theta_0=theta_0,
+            theta_1=theta_1,
+            weibull_lambda=TH_RECOVERY_LAMBDA,
+            weibull_kappa=TH_RECOVERY_KAPPA,
+        )
+        estimator.init_value(x_hat0, P0)
+        estimator.last_decision = initial_decision
+
+        p_t_for_policy = policy_p_t[POLICY_TYPE]
+
+        policy = build_policy(
+            policy_type=POLICY_TYPE,
+            A=A,
+            Q=Q,
+            c=c,
+            Delta=Delta,
+            alpha_fp=alpha_fp,
+            alpha_fn=alpha_fn,
+            ell=lookahead_ell,
+            xi=xi,
+            initial_decision=initial_decision,
+            p_t=p_t_for_policy,
+            p_u0=pu0,
+            p_u1=pu1,
+            p_prob=p_prob_calibrated,
+        )
+
+        print(f"\nRunning policy '{POLICY_TYPE}' with p_t = {p_t_for_policy:.4f}"
+              + (f", p_prob = {p_prob_calibrated:.4f}" if POLICY_TYPE == "probability" else ""))
+
+        results = simulate_system(sensor, estimator, T, policy,
+                                  blocklength_n=BLOCKLENGTH_N,
+                                  t_sym=T_SYM,
+                                  p_t_default=p_t_for_policy,
+                                  env_seq=env_seq)
+
+        all_results[POLICY_TYPE] = results
+
+    plot_results(all_results, Delta)

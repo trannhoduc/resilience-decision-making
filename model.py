@@ -30,26 +30,36 @@ class Model:
         self.x_s = np.asarray(x_s0, dtype=float).reshape(-1, 1)
         self.P_s = np.asarray(P_s0, dtype=float)
 
-    def evolve_true_state(self):
+    def evolve_true_state(self, w_k=None):
         """
         True process:
             x_k = A x_{k-1} + w_k
+        w_k: optional pre-generated noise vector (shape (n,) or (n,1)).
+             If None, drawn fresh from N(0, Q).
         """
-        w_k = np.random.multivariate_normal(
-            mean=np.zeros(self.n), cov=self.Q
-        ).reshape(-1, 1)
+        if w_k is None:
+            w_k = np.random.multivariate_normal(
+                mean=np.zeros(self.n), cov=self.Q
+            ).reshape(-1, 1)
+        else:
+            w_k = np.asarray(w_k, dtype=float).reshape(-1, 1)
 
         self.x_true = self.A @ self.x_true + w_k
         return self.x_true
 
-    def measure(self):
+    def measure(self, v_k=None):
         """
         Measurement:
             y_k = C x_k + v_k
+        v_k: optional pre-generated noise vector (shape (m,) or (m,1)).
+             If None, drawn fresh from N(0, R).
         """
-        v_k = np.random.multivariate_normal(
-            mean=np.zeros(self.m), cov=self.R
-        ).reshape(-1, 1)
+        if v_k is None:
+            v_k = np.random.multivariate_normal(
+                mean=np.zeros(self.m), cov=self.R
+            ).reshape(-1, 1)
+        else:
+            v_k = np.asarray(v_k, dtype=float).reshape(-1, 1)
 
         y_k = self.C @ self.x_true + v_k
         return y_k
@@ -76,15 +86,16 @@ class Model:
 
         return self.x_s, self.P_s
 
-    def step(self):
+    def step(self, w_k=None, v_k=None):
         """
         One full sensor-side time step:
           1) true state evolves
           2) measurement is generated
           3) local KF runs
+        w_k, v_k: optional pre-generated noise (passed to evolve/measure).
         """
-        x_true = self.evolve_true_state()
-        y_k = self.measure()
+        x_true = self.evolve_true_state(w_k=w_k)
+        y_k = self.measure(v_k=v_k)
         x_s, P_s = self.local_kf_step(y_k)
         return x_true, y_k, x_s, P_s
 
@@ -190,22 +201,26 @@ class RemoteEstimator:
         value = float(self.c.T @ x)
         return 1 if value >= self.Delta else 0
 
-    def packet_success(self, transmit, p_t):
+    def packet_success(self, transmit, p_t, h2=None, chan_u=None):
         """
         If sensor decides not to transmit => delta = 0.
         If a disruption is active => delta = 0 (outage blocks all receptions).
         Otherwise: draw h2 ~ Exp(1), compute instantaneous SNR gamma = h2 * gbar
         (gbar = p_t / noise_var), and succeed with probability 1 - epsilon_k.
+
+        h2:     optional pre-generated Exp(1) channel gain.
+        chan_u:  optional pre-generated U[0,1] for the success Bernoulli.
         """
         if transmit == 0:
             return 0
         if self._disruption_active:
             return 0
-        h2 = np.random.exponential(scale=1.0)
+        h2 = np.random.exponential(scale=1.0) if h2 is None else float(h2)
+        chan_u = np.random.rand() if chan_u is None else float(chan_u)
         gbar = p_t / self.noise_var
         gamma = h2 * gbar
         eps_k = compute_instantaneous_packet_error(gamma, self.blocklength_n, self.info_bits_l)
-        success = np.random.rand() > eps_k
+        success = chan_u > eps_k
         return 1 if success else 0
 
     def reliable_decision(self, x_hat=None, P=None):
@@ -261,13 +276,17 @@ class RemoteEstimator:
 
         return info
 
-    def step(self, x_s, P_s, transmit, k, p_t=1.0):
+    def step(self, x_s, P_s, transmit, k, p_t=1.0,
+             disruption_u=None, h2=None, chan_u=None):
         """
         Remote estimator update at time step k.
 
-        transmit : sensor transmission decision (0 or 1)
-        k        : current time index (used for recovery scheduling)
-        p_t      : transmit power used by the sensor this step (determines instantaneous PER)
+        transmit     : sensor transmission decision (0 or 1)
+        k            : current time index (used for recovery scheduling)
+        p_t          : transmit power used by the sensor this step (determines instantaneous PER)
+        disruption_u : optional pre-generated U[0,1] for disruption onset Bernoulli.
+        h2           : optional pre-generated Exp(1) channel gain.
+        chan_u        : optional pre-generated U[0,1] for channel success Bernoulli.
 
         Disruption / AoI / recovery logic:
           - Each step: if no disruption has occurred yet this sojourn, roll
@@ -291,14 +310,15 @@ class RemoteEstimator:
         # ------------------------------------------------------------------
         if not self._disruption_occurred:
             p_rs = self.p_r * self.q01 if self._sojourn_state == 0 else self.p_r * self.q10
-            if np.random.rand() < p_rs:
+            u_dis = np.random.rand() if disruption_u is None else float(disruption_u)
+            if u_dis < p_rs:
                 self._disruption_active = True
                 self._disruption_occurred = True
 
         # ------------------------------------------------------------------
         # Reception (disruption blocks regardless of channel or transmit)
         # ------------------------------------------------------------------
-        delta_k = self.packet_success(transmit, p_t)
+        delta_k = self.packet_success(transmit, p_t, h2=h2, chan_u=chan_u)
         self.delta_k = delta_k
 
         # ------------------------------------------------------------------
@@ -746,13 +766,40 @@ def build_policy(policy_type, A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi,
     raise ValueError(f"Unknown policy_type '{policy_type}'. "
                      f"Choose 'predictive', 'resilient_predictive', 'probability', or 'event_trigger'.")
 
-def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_sym, p_t_default=20.0):
+def generate_env_sequences(T, n, m, Q, R):
+    """
+    Pre-generate all environment randomness for T steps so that the same
+    physical environment can be replayed identically across different policies.
+
+    Returns a dict with arrays of shape:
+        "w"          : (T, n)  — process noise w_k ~ N(0, Q)
+        "v"          : (T, m)  — measurement noise v_k ~ N(0, R)
+        "disruption" : (T,)    — U[0,1] for disruption onset Bernoulli
+        "h2"         : (T,)    — Exp(1) channel gain
+        "chan"        : (T,)    — U[0,1] for channel success Bernoulli
+    """
+    w = np.random.multivariate_normal(np.zeros(n), Q, size=T)          # (T, n)
+    v = np.random.multivariate_normal(np.zeros(m), R, size=T)          # (T, m)
+    disruption = np.random.rand(T)                                      # (T,)
+    h2 = np.random.exponential(scale=1.0, size=T)                      # (T,)
+    chan = np.random.rand(T)                                            # (T,)
+    return {"w": w, "v": v, "disruption": disruption, "h2": h2, "chan": chan}
+
+
+def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_sym,
+                    p_t_default=20.0, env_seq=None):
     """
     Run the joint simulation.
 
     transmission_policy(...) must return 0 or 1.
     Energy per transmission = blocklength_n * p_t * t_sym,
     where p_t is read from the policy (falls back to p_t_default).
+
+    env_seq: optional dict returned by generate_env_sequences(). When provided,
+             process noise, measurement noise, disruption onset draws, channel
+             gain h2, and channel success draws are taken from the pre-generated
+             arrays instead of sampled live — ensuring identical environment
+             across different policies.
     """
     p_t = float(getattr(transmission_policy, "p_t", p_t_default))
     energy_per_tx = blocklength_n * p_t * t_sym
@@ -775,8 +822,11 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
     predicted_horizon_hist = []
 
     for k in range(T):
-        # Sensor side
-        x_true, y_k, x_s, P_s = sensor.step()
+        # Sensor side — use pre-generated noise if env_seq provided
+        if env_seq is not None:
+            x_true, y_k, x_s, P_s = sensor.step(w_k=env_seq["w"][k], v_k=env_seq["v"][k])
+        else:
+            x_true, y_k, x_s, P_s = sensor.step()
 
         # Sensor decides whether to transmit
         transmit = int(transmission_policy(
@@ -791,14 +841,13 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
         # Record disruption state BEFORE the step (reflects whether this step is blocked)
         disruption_hist.append(int(getattr(estimator, '_disruption_active', 0)))
 
-        # Remote estimator step
-        x_hat, P, delta_k, decision_est, decision_info = estimator.step(
-            x_s=x_s,
-            P_s=P_s,
-            transmit=transmit,
-            k=k,
-            p_t=p_t,
-        )
+        # Remote estimator step — use pre-generated channel/disruption draws if env_seq provided
+        est_kwargs = dict(x_s=x_s, P_s=P_s, transmit=transmit, k=k, p_t=p_t)
+        if env_seq is not None:
+            est_kwargs["disruption_u"] = env_seq["disruption"][k]
+            est_kwargs["h2"]           = env_seq["h2"][k]
+            est_kwargs["chan_u"]        = env_seq["chan"][k]
+        x_hat, P, delta_k, decision_est, decision_info = estimator.step(**est_kwargs)
 
         # True event
         true_value = float(estimator.c.T @ x_true)
