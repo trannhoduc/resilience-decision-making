@@ -20,7 +20,7 @@ dt = 1.0                               # Sampling time
 # SIMULATION
 # =============================================================================
 
-T       = 2000                         # Total simulation steps
+T       = 10000                         # Total simulation steps
 Delta   = 5.0                          # Disruption magnitude
 epsilon = 0.01                          # Perturbation parameter
 
@@ -30,9 +30,9 @@ MU_W = np.zeros((A.shape[0], 1))       # Process-noise mean (Assumption 1)
 # DETECTION THRESHOLDS
 # =============================================================================
 
-ALPHA_FN       = 0.1                   # False-negative rate (temporary)
-ALPHA_FP       = 0.1                   # False-positive rate (temporary)
-LOOKAHEAD_ELL  = 20                    # Lookahead horizon (temporary)
+ALPHA_FN       = 0.01                   # False-negative rate (temporary)
+ALPHA_FP       = 0.01                   # False-positive rate (temporary)
+LOOKAHEAD_ELL  = 10                    # Lookahead horizon (temporary)
 
 # =============================================================================
 # XI (DECISION THRESHOLD) CONFIGURATION
@@ -49,11 +49,11 @@ XI_WEIGHT_FN = 1.0                     # Penalty weight for false negatives
 # =============================================================================
 
 BLOCKLENGTH_N      = 128               # Block length n
-INFO_BITS_L        = 64                # Information bits L
+INFO_BITS_L        = 256                # Information bits L
 CHANNEL_NOISE_VAR  = 1.0               # Channel noise variance
 
 PT_MIN = 0.05                          # Minimum transmission power
-PT_MAX = 50                            # Maximum transmission power
+PT_MAX = 2000                            # Maximum transmission power
 RHO    = 50.0                          # Power budget / SNR scaling
 
 BW = 1e6                               # Bandwitch
@@ -64,17 +64,17 @@ P_T = 20
 # RECOVERY MODEL
 # =============================================================================
 
-P_R               = 0.02              # Recovery probability per step
-EPSILON_L         = 0.05              # Loss probability threshold
-TH_RECOVERY_LAMBDA = 6.0              # Recovery threshold lambda
+P_R               = 0.00              # Recovery probability per step
+EPSILON_L         = 0.02             # Loss probability threshold
+TH_RECOVERY_LAMBDA = 4.0              # Recovery threshold lambda
 TH_RECOVERY_KAPPA  = 2.0              # Recovery threshold kappa
 
 # =============================================================================
 # THETA CANDIDATE SETS
 # =============================================================================
 
-THETA0_CANDIDATES = list(range(1, 18)) # Candidate values for theta_0
-THETA1_CANDIDATES = list(range(1, 6))  # Candidate values for theta_1
+THETA0_CANDIDATES = list(range(1, 20)) # Candidate values for theta_0
+THETA1_CANDIDATES = list(range(1, 10))  # Candidate values for theta_1
 
 # =============================================================================
 # MONTE CARLO (INVARIANT DISTRIBUTION)

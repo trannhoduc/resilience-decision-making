@@ -61,8 +61,6 @@ def compute_instantaneous_packet_error(gamma: float, n: int, l: int) -> float:
     where
         C(gamma) = log(1 + gamma),
         V(gamma) = 1 - (1 + gamma)^(-2).
-
-    Natural logarithm is used, matching the manuscript notation.
     """
     gamma = float(max(gamma, 0.0))
     n = int(n)
@@ -71,7 +69,8 @@ def compute_instantaneous_packet_error(gamma: float, n: int, l: int) -> float:
     if gamma <= 1e-14:
         return 1.0
 
-    C_gamma = math.log2(1.0 + gamma)
+    #C_gamma = math.log2(1.0 + gamma)
+    C_gamma = math.log(1.0 + gamma)
     V_gamma = 1.0 - (1.0 + gamma) ** (-2.0)
 
     if V_gamma <= 1e-14:
@@ -1020,4 +1019,3 @@ if __name__ == "__main__":
         print(f"Gamma1             : {best['Gamma_1']:.6f}")
         print(f"average rate       : {best['average_rate']:.6f}")
         print(f"objective          : {best['objective']:.6f}")
-

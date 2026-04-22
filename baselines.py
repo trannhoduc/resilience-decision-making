@@ -20,6 +20,7 @@ The three baselines are:
 
 from __future__ import annotations
 
+import math
 from typing import Callable, Dict
 
 import numpy as np
@@ -92,15 +93,12 @@ def calibrate_baselines(
     #
     # The transmit power is then set so that p_t_pred * r_pred = E.
     # ------------------------------------------------------------------
-    r_pred   = 2.0 * q01 * q10 / (q01 + q10)
-    p_t_pred = E / r_pred
-    feasible_pred = bool(p_t_pred <= p_t_max)
-
-    assert abs(p_t_pred * r_pred - E) < 1e-6, (
-        f"Energy check failed for predictive/event baseline: "
-        f"p_t={p_t_pred:.8f}, rate={r_pred:.8f}, "
-        f"product={p_t_pred * r_pred:.8f}, E={E:.8f}"
-    )
+    r_pred          = 2.0 * q01 * q10 / (q01 + q10)
+    p_t_pred_ideal  = E / r_pred                        # unconstrained power
+    feasible_pred   = bool(p_t_pred_ideal <= p_t_max)
+    # Cap to the hardware limit.  When infeasible the baseline runs at p_t_max
+    # (energy slightly above budget); that is noted via feasible=False.
+    p_t_pred = min(p_t_pred_ideal, p_t_max)
 
     # ------------------------------------------------------------------
     # 3.  Probability-based (Bernoulli-p per slot)
@@ -152,4 +150,105 @@ def calibrate_baselines(
             "boundary_hit": boundary_hit,
         },
         "energy_budget": E,
+    }
+
+
+def compute_baseline_thresholds(
+    q01: float,
+    q10: float,
+    eta_prob: float,
+    epsilon_r: float,
+) -> Dict:
+    """
+    Compute the AoI threshold each baseline uses to declare an outage.
+
+    All baselines share the same reliability target ``epsilon_r`` that the
+    proposed method achieves.  The thresholds are the smallest integer theta
+    such that the probability of NOT detecting an outage within theta slots
+    is <= epsilon_r.
+
+    Baseline-specific formulas
+    --------------------------
+
+    1. **Probability baseline** — single threshold, state-independent.
+
+       The per-slot effective detection rate is::
+
+           eta = p_prob * (1 - eps_bar(p_t_prob))
+
+       passed in as ``eta_prob``.  The threshold is then the
+       (1 - epsilon_r)-quantile of the geometric waiting time::
+
+           theta_prob = ceil( log(epsilon_r) / log(1 - eta_prob) )
+
+    2. **Predictive-only and Event-triggered** — per-state thresholds,
+       because sojourn times are Geometric with state-dependent parameter.
+
+       AoI grows continuously (no reset on state transition for baselines).
+       Within a sojourn in state s the probability that AoI has NOT yet
+       reached theta_s after theta_s slots is q_ss^{theta_s} — matching
+       the complementary CDF of the geometric sojourn.  Setting this equal
+       to epsilon_r gives::
+
+           theta_s = ceil( log(epsilon_r) / log(q_ss) )
+
+       where q00 = 1 - q01 and q11 = 1 - q10.
+
+    Parameters
+    ----------
+    q01       : Markov surrogate transition probability 0 → 1.
+    q10       : Markov surrogate transition probability 1 → 0.
+    eta_prob  : Effective per-slot detection rate for the probability
+                baseline: ``p_prob * (1 - eps_bar(p_t_prob))``.
+    epsilon_r : Reliability target (from the proposed method's design).
+
+    Returns
+    -------
+    dict::
+
+        {
+          'predictive':  {'theta_0': int, 'theta_1': int},
+          'event':       {'theta_0': int, 'theta_1': int},
+          'probability': {'theta':   int},
+        }
+    """
+    q01 = float(q01)
+    q10 = float(q10)
+    eta_prob = float(eta_prob)
+    epsilon_r = float(epsilon_r)
+
+    if not (0.0 < epsilon_r < 1.0):
+        raise ValueError(f"epsilon_r must be in (0, 1), got {epsilon_r}.")
+
+    # ------------------------------------------------------------------
+    # Predictive-only / Event-triggered: geometric sojourn quantiles
+    # ------------------------------------------------------------------
+    q00 = 1.0 - q01
+    q11 = 1.0 - q10
+
+    if q00 <= 0.0 or q00 >= 1.0:
+        theta_pred_0 = 1
+    else:
+        theta_pred_0 = int(math.ceil(math.log(epsilon_r) / math.log(q00)))
+
+    if q11 <= 0.0 or q11 >= 1.0:
+        theta_pred_1 = 1
+    else:
+        theta_pred_1 = int(math.ceil(math.log(epsilon_r) / math.log(q11)))
+
+    # ------------------------------------------------------------------
+    # Probability baseline: single geometric quantile with rate eta_prob
+    # ------------------------------------------------------------------
+    eta_prob = float(np.clip(eta_prob, 1e-9, 1.0 - 1e-9))
+    theta_prob = int(math.ceil(math.log(epsilon_r) / math.log(1.0 - eta_prob)))
+
+    # Ensure all thresholds are at least 1
+    theta_pred_0 = max(1, theta_pred_0)
+    theta_pred_1 = max(1, theta_pred_1)
+    theta_prob   = max(1, theta_prob)
+
+    return {
+        "predictive":  {"theta_0": theta_pred_0, "theta_1": theta_pred_1},
+        "event":       {"theta_0": theta_pred_0, "theta_1": theta_pred_1},
+        "probability": {"theta":   theta_prob},
     }
