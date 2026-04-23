@@ -133,6 +133,7 @@ class RemoteEstimator:
         self._horizon_detected = False
         self._current_horizon = None
         self._horizon_history = []
+        self._horizon_state_history = []
         self._sojourn_initialized = False
 
         self.n = A.shape[0]
@@ -177,25 +178,36 @@ class RemoteEstimator:
         self._horizon_detected = False
         self._current_horizon = None
         self._horizon_history = []
+        self._horizon_state_history = []
         self._sojourn_initialized = False
 
         # Initialise sojourn tracking for time step 0
         self._init_sojourn()
         self._sojourn_initialized = True
 
-    def _init_sojourn(self):
+    def _init_sojourn(self, delta_k=None):
         """
         Called at the start of every new sojourn (state transition detected or at init).
           - Active disruption persists across sojourn boundaries; it is cleared
             only by the recovery mechanism (not by the sojourn transition itself).
           - Active recovery window (_in_recovery) is NOT interrupted by a
             sojourn transition; it continues until t_h elapses.
+
+        delta_k: reception indicator at the transition step (1=received, 0=not received).
+          Used to distinguish on-time (h=0) from miss (h=-1) when no prediction was made.
         """
         if self._sojourn_initialized:
+            from_state = self._sojourn_state   # state of the sojourn that just ended
             if self._horizon_detected:
+                # Estimator predicted the transition ahead of time
                 self._horizon_history.append(self._current_horizon)
-            else:
+            elif delta_k == 1:
+                # No prior prediction, but packet received at the transition step
                 self._horizon_history.append(0)
+            else:
+                # No prediction and no packet at the transition step — miss
+                self._horizon_history.append(-1)
+            self._horizon_state_history.append(from_state)
 
         self._sojourn_state = int(self.last_decision)
         self._horizon_detected = False
@@ -386,8 +398,12 @@ class RemoteEstimator:
         # ------------------------------------------------------------------
         # Estimator-side predictive horizon measurement (observational only,
         # does NOT change the decision or any other estimator state).
+        # Only run when a fresh packet was received (delta_k == 1) so that
+        # KF drift on stale estimates (e.g. event-trigger steady state) does
+        # not spuriously set _horizon_detected and inflate the horizon for
+        # policies that never send predictive packets.
         # ------------------------------------------------------------------
-        if decision == self.last_decision and not self._horizon_detected:
+        if decision == self.last_decision and not self._horizon_detected and delta_k == 1:
             _pred = predictive_transition_detection(
                 x_hat_sensor=self.x_hat,
                 P_sensor=self.P,
@@ -415,7 +431,7 @@ class RemoteEstimator:
         prev_decision = self.last_decision
         self.last_decision = decision
         if decision != prev_decision:
-            self._init_sojourn()
+            self._init_sojourn(delta_k=delta_k)
 
         return self.x_hat, self.P, delta_k, decision, decision_info
 
@@ -976,67 +992,71 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
     false_negative_rate = len(fn_idx) / num_positive_truth if num_positive_truth > 0 else 0.0
 
     # --- Estimator-side predictive horizon ---
-    horizon_history = estimator._horizon_history
-    avg_predicted_horizon = float(np.mean(horizon_history)) if len(horizon_history) > 0 else float("nan")
+    # horizon_history entries: -1 = miss, 0 = on-time, >0 = predicted h steps ahead.
+    # One entry per estimator-detected sojourn transition.
+    horizon_history       = estimator._horizon_history
+    horizon_state_history = estimator._horizon_state_history
 
-    # --- P(L >= 0) and E[L]: timeliness of transition updates ---
-    # For each true transition at T_idx, find T_u = the step when the estimator
-    # last entered the post-transition state before (or at) T_idx and stayed
-    # there through T_idx.  L = T_idx - T_u >= 0 means timely.
-    # This handles oscillations: a false alarm followed by a return to the wrong
-    # state before T_idx is correctly counted as a miss.
-    if env_seq is not None and "state_seq" in env_seq:
-        state_seq = env_seq["state_seq"]
-        est_events_arr = np.array(est_events)
+    pred_vals = [h for h in horizon_history if h > 0]
+    # Average over transitions where a predictive horizon was actually detected
+    avg_predicted_horizon_estimator = float(np.mean(pred_vals)) if pred_vals else float("nan")
+    # Average over ALL estimator-detected transitions (misses and on-times contribute 0)
+    n_true_transitions = len(horizon_history)
+    avg_predicted_horizon_total = (
+        float(sum(pred_vals)) / n_true_transitions
+        if n_true_transitions > 0 else float("nan")
+    )
+    # --- Per-state lead-time distribution from horizon_history ---
+    # Keyed by from_state (0 = alarm onset 0->1, 1 = alarm clearing 1->0).
+    # Values: -1 = miss, 0 = on-time, >0 = predicted h steps ahead.
+    def _state_summary(L_list):
+        if not L_list:
+            return {"n_total": 0, "n_pred": 0, "n_ontime": 0, "n_miss": 0,
+                    "prob_L_geq_0": float("nan"), "avg_pred_horizon": float("nan")}
+        n_total  = len(L_list)
+        n_miss   = sum(1 for l in L_list if l < 0)
+        n_ontime = sum(1 for l in L_list if l == 0)
+        n_pred   = sum(1 for l in L_list if l > 0)
+        prob     = (n_pred + n_ontime) / n_total
+        pv       = [l for l in L_list if l > 0]
+        avg_ph   = float(np.mean(pv)) if pv else 0.0
+        return {"n_total": n_total, "n_pred": n_pred, "n_ontime": n_ontime,
+                "n_miss": n_miss, "prob_L_geq_0": prob, "avg_pred_horizon": avg_ph}
 
-        true_transition_indices = []
-        for kk in range(1, len(state_seq)):
-            if state_seq[kk] != state_seq[kk - 1]:
-                true_transition_indices.append(kk)
+    L_per_state = {0: [], 1: []}
+    for h, s in zip(horizon_history, horizon_state_history):
+        L_per_state[s].append(h)
 
-        n_timely = 0
-        L_values = []
-        for T_idx in true_transition_indices:
-            if T_idx >= len(est_events_arr):
-                continue
-            new_state = int(state_seq[T_idx])
-            # Walk backward to find the latest step where the estimator
-            # was still in the OLD state — T_u is the step after that.
-            last_wrong = -1
-            for j in range(T_idx, -1, -1):
-                if int(est_events_arr[j]) != new_state:
-                    last_wrong = j
-                    break
-            if last_wrong == T_idx:
-                # Estimator is still in old state at the transition moment: miss
-                pass
-            else:
-                # last_wrong < T_idx (or -1 meaning never wrong)
-                T_u = last_wrong + 1
-                L = T_idx - T_u
-                n_timely += 1
-                L_values.append(L)
+    stats_s0 = _state_summary(L_per_state[0])   # 0->1 transitions
+    stats_s1 = _state_summary(L_per_state[1])   # 1->0 transitions
 
-        n_true_transitions = len(true_transition_indices)
-        prob_L_geq_0 = float(n_timely) / n_true_transitions if n_true_transitions > 0 else float("nan")
-        avg_L = float(np.mean(L_values)) if L_values else float("nan")
-    else:
-        n_true_transitions = 0
-        prob_L_geq_0 = float("nan")
-        avg_L = float("nan")
-        L_values = []
+    all_L = list(horizon_history)
+    n_timely_overall = sum(1 for l in all_L if l >= 0)
+    prob_L_geq_0 = (float(n_timely_overall) / n_true_transitions
+                    if n_true_transitions > 0 else float("nan"))
 
     total_energy = float(np.sum(energy_hist))
     avg_energy = total_energy / T
 
     total_disruption_steps = int(np.sum(disruption_hist))
 
+    def _fmt_nan(v, fmt=".4f"):
+        return "nan" if math.isnan(v) else format(v, fmt)
+
     print(f"False Positive Rate (FPR): {false_positive_rate:.4f}")
     print(f"False Negative Rate (FNR): {false_negative_rate:.4f}")
-    print(f"Avg Predicted Horizon (est): {avg_predicted_horizon:.4f}")
-    print(f"P(L >= 0):                   {prob_L_geq_0:.4f}")
-    print(f"E[L | timely]:               {avg_L:.4f}")
-    print(f"True transitions:            {n_true_transitions}")
+    print(f"Avg Predicted Horizon (est-side, pred only):  {_fmt_nan(avg_predicted_horizon_estimator)}")
+    print(f"Avg Predicted Horizon (over all transitions): {_fmt_nan(avg_predicted_horizon_total)}")
+    print(f"P(L >= 0) overall:           {_fmt_nan(prob_L_geq_0)}")
+    print(f"Transitions (est-detected):  {n_true_transitions}")
+    for label, st in [("0->1 (alarm onset) ", stats_s0),
+                      ("1->0 (alarm clear) ", stats_s1)]:
+        print(f"  [{label}] total={st['n_total']:4d} "
+              f"| pred(L>0)={st['n_pred']:4d} "
+              f"| on-time(L=0)={st['n_ontime']:4d} "
+              f"| miss={st['n_miss']:4d} "
+              f"| P(L>=0)={_fmt_nan(st['prob_L_geq_0'])} "
+              f"| E[L|L>0]={_fmt_nan(st['avg_pred_horizon'])}")
     print(f"Total Energy Consumption:  {total_energy:.6e} J")
     print(f"Avg Energy per Step:       {avg_energy:.6e} J")
     print(f"Disruption steps:          {total_disruption_steps} / {T}")
@@ -1062,15 +1082,17 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
         "fn_idx": np.array(fn_idx),
         "fpr": false_positive_rate,
         "fnr": false_negative_rate,
-        "avg_predicted_horizon": avg_predicted_horizon,
+        "avg_predicted_horizon":       avg_predicted_horizon_estimator,
+        "avg_predicted_horizon_total": avg_predicted_horizon_total,
         "total_energy": total_energy,
         "avg_energy": avg_energy,
         "disruption_hist": disruption_hist,
         "z_hist": z_hist,
         "region_hist": region_hist,
         "prob_L_geq_0":       prob_L_geq_0,
-        "avg_L":              avg_L,
-        "L_values":           L_values,
+        "L_per_state":        L_per_state,
+        "stats_s0":           stats_s0,
+        "stats_s1":           stats_s1,
         "n_true_transitions": n_true_transitions,
         "horizon_history":    horizon_history,
         # Recovery detection quality
@@ -1099,7 +1121,6 @@ def plot_results(results, Delta):
 
     fpr = results["fpr"]
     fnr = results["fnr"]
-    avg_predicted_horizon = results.get("avg_predicted_horizon", float("nan"))
     total_energy = results.get("total_energy", float("nan"))
     avg_energy = results.get("avg_energy", float("nan"))
     disruption_hist = results.get("disruption_hist", np.zeros(len(t), dtype=int))
@@ -1166,10 +1187,15 @@ def plot_results(results, Delta):
         )
 
     total_disruption_steps = int(np.sum(disruption_hist))
+    avg_ph_est   = results.get("avg_predicted_horizon",       float("nan"))
+    avg_ph_total = results.get("avg_predicted_horizon_total", float("nan"))
+    def _nan_fmt(v, fmt=".4f"):
+        return "nan" if math.isnan(float(v)) else format(float(v), fmt)
     textstr = (
         f"FPR = {fpr:.4f}\n"
         f"FNR = {fnr:.4f}\n"
-        f"Avg Predicted Horizon = {avg_predicted_horizon:.4f}\n"
+        f"E[L|L>0] (pred only)  = {_nan_fmt(avg_ph_est)}\n"
+        f"E[L] (all transitions) = {_nan_fmt(avg_ph_total)}\n"
         f"Total Energy = {total_energy:.4e} J\n"
         f"Avg Energy/Step = {avg_energy:.4e} J\n"
         f"Disruption steps = {total_disruption_steps}"
@@ -1220,6 +1246,143 @@ def plot_results(results, Delta):
 
     plt.tight_layout()
     plt.show()
+
+
+def plot_horizon_histograms(all_results, policy_names=None, x_cap=15):
+    """
+    For each policy, plot two subplots (0->1 and 1->0 transitions).
+    Three bar categories per subplot:
+      Blue  (L > 0) : individual bars at L=1,2,...,x_cap; values beyond x_cap
+                      are collapsed into a single bar labelled "≥x_cap+1"
+      Green (L = 0) : on-time — estimator first correct exactly at T_idx
+      Red   (L < 0) : miss    — estimator still wrong at T_idx
+
+    x_cap controls how far the x-axis extends before collapsing overflow.
+    """
+    import matplotlib.pyplot as plt
+
+    if policy_names is None:
+        policy_names = list(all_results.keys())
+
+    n_policies   = len(policy_names)
+    col_pred     = "#2196F3"   # blue  — L > 0
+    col_on       = "#4CAF50"   # green — L = 0
+    col_miss     = "#F44336"   # red   — miss
+    col_overflow = "#90CAF9"   # light blue — overflow bucket
+
+    fig, axes = plt.subplots(n_policies, 2,
+                             figsize=(13, 3.5 * n_policies),
+                             squeeze=False)
+
+    state_labels = {0: "0→1  (alarm onset)", 1: "1→0  (alarm clearing)"}
+
+    for row_idx, name in enumerate(policy_names):
+        res         = all_results[name]
+        L_per_state = res.get("L_per_state", {0: [], 1: []})
+
+        for col_idx, from_state in enumerate([0, 1]):
+            ax     = axes[row_idx][col_idx]
+            L_list = L_per_state.get(from_state, [])
+            st     = res["stats_s" + str(from_state)]
+
+            if not L_list:
+                ax.set_title(f"{name}\n{state_labels[from_state]}")
+                ax.text(0.5, 0.5, "no transitions", ha="center", va="center",
+                        transform=ax.transAxes)
+                continue
+
+            pred_vals = [l for l in L_list if l > 0]
+            n_ontime  = sum(1 for l in L_list if l == 0)
+            n_miss    = sum(1 for l in L_list if l < 0)
+            n_total   = len(L_list)
+            assert len(pred_vals) + n_ontime + n_miss == n_total
+
+            # Split pred values into in-range [1, x_cap] and overflow (>x_cap)
+            pred_inrange  = [l for l in pred_vals if 1 <= l <= x_cap]
+            pred_overflow = [l for l in pred_vals if l > x_cap]
+
+            # ── bar positions ──────────────────────────────────────────────
+            # miss at -2 (visual gap), on-time at 0, L=1..x_cap, overflow at x_cap+1
+            bar_x      = []
+            bar_h      = []
+            bar_colors = []
+
+            # miss bar (left of dashed separator)
+            if n_miss > 0:
+                bar_x.append(-2)
+                bar_h.append(n_miss)
+                bar_colors.append(col_miss)
+
+            # on-time bar
+            if n_ontime > 0:
+                bar_x.append(0)
+                bar_h.append(n_ontime)
+                bar_colors.append(col_on)
+
+            # individual L = 1 .. x_cap bars (skip zeros)
+            for lv in range(1, x_cap + 1):
+                cnt = pred_inrange.count(lv)
+                if cnt > 0:
+                    bar_x.append(lv)
+                    bar_h.append(cnt)
+                    bar_colors.append(col_pred)
+
+            # overflow bucket
+            if pred_overflow:
+                bar_x.append(x_cap + 1)
+                bar_h.append(len(pred_overflow))
+                bar_colors.append(col_overflow)
+
+            ax.bar(bar_x, bar_h, color=bar_colors, width=0.7, edgecolor="white")
+
+            # dashed separator between miss and the rest
+            if n_miss > 0:
+                ax.axvline(x=-1, color="gray", linestyle="--", linewidth=0.9)
+
+            # ── x-axis ticks and labels ────────────────────────────────────
+            tick_pos    = []
+            tick_labels = []
+            if n_miss > 0:
+                tick_pos.append(-2);          tick_labels.append("miss")
+            if n_ontime > 0:
+                tick_pos.append(0);           tick_labels.append("0")
+            for lv in range(1, x_cap + 1):
+                if pred_inrange.count(lv) > 0:
+                    tick_pos.append(lv);      tick_labels.append(str(lv))
+            if pred_overflow:
+                tick_pos.append(x_cap + 1);  tick_labels.append(f"≥{x_cap+1}")
+
+            ax.set_xticks(tick_pos)
+            ax.set_xticklabels(tick_labels, fontsize=8)
+            ax.set_xlim(-3, x_cap + 2)
+
+            # ── legend entries ─────────────────────────────────────────────
+            from matplotlib.patches import Patch
+            legend_handles = [
+                Patch(color=col_miss,     label=f"miss: {n_miss}"),
+                Patch(color=col_on,       label=f"L=0 (on-time): {n_ontime}"),
+                Patch(color=col_pred,     label=f"L>0 (early): {len(pred_inrange)}"),
+            ]
+            if pred_overflow:
+                legend_handles.append(
+                    Patch(color=col_overflow,
+                          label=f"L≥{x_cap+1} (early, overflow): {len(pred_overflow)}"))
+            ax.legend(handles=legend_handles, fontsize=7, loc="upper right")
+
+            ax.set_title(
+                f"{name}  |  {state_labels[from_state]}\n"
+                f"total={n_total}  "
+                f"P(L≥0)={st['prob_L_geq_0']:.3f}  "
+                f"E[L|L>0]={st['avg_pred_horizon']:.2f}",
+                fontsize=9)
+            ax.set_xlabel("Lead time L (steps)", fontsize=8)
+            ax.set_ylabel("Count", fontsize=8)
+
+    fig.suptitle("Predicted Horizon Distribution per State and Policy",
+                 fontsize=12, y=1.01)
+    plt.tight_layout()
+    plt.show()
+
 
 class ProbabilityPolicy:
     """

@@ -298,11 +298,23 @@ if __name__ == "__main__":
         print(f"  {theta_str:<22}   "
               f"TP={res['n_tp']:3d} FP={res['n_fp']:3d} total={res['total_triggers']:3d}")
 
+    # Per-state P(L>=0) breakdown
+    print("\nPer-state timeliness breakdown:")
+    for name, res in all_results.items():
+        s0 = res["stats_s0"]
+        s1 = res["stats_s1"]
+        print(f"  {name:<24} "
+              f"0->1: pred={s0['n_pred']:4d} on-time={s0['n_ontime']:4d} miss={s0['n_miss']:4d} "
+              f"P(L>=0)={_fmt(s0['prob_L_geq_0'])} E[L|L>0]={_fmt(s0['avg_pred_horizon'])}  |  "
+              f"1->0: pred={s1['n_pred']:4d} on-time={s1['n_ontime']:4d} miss={s1['n_miss']:4d} "
+              f"P(L>=0)={_fmt(s1['prob_L_geq_0'])} E[L|L>0]={_fmt(s1['avg_pred_horizon'])}")
+
     print(sep)
 
     # ------------------------------------------------------------------
-    # Plot the proposed method's result (keeps original plot_results call)
+    # Plots
     # ------------------------------------------------------------------
-    plot_results(all_results["resilient_predictive"], Delta)
-    plot_results(all_results["probability"], Delta)
+    # plot_results(all_results["resilient_predictive"], Delta)
+    # plot_results(all_results["probability"], Delta)
+    plot_horizon_histograms(all_results)
     
