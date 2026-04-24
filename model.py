@@ -185,34 +185,45 @@ class RemoteEstimator:
         self._init_sojourn()
         self._sojourn_initialized = True
 
-    def _init_sojourn(self, delta_k=None):
+    def _init_sojourn(self):
         """
-        Called at the start of every new sojourn (state transition detected or at init).
+        Called at the start of every new sojourn (estimator-side transition detected or at init).
           - Active disruption persists across sojourn boundaries; it is cleared
             only by the recovery mechanism (not by the sojourn transition itself).
           - Active recovery window (_in_recovery) is NOT interrupted by a
             sojourn transition; it continues until t_h elapses.
 
-        delta_k: reception indicator at the transition step (1=received, 0=not received).
-          Used to distinguish on-time (h=0) from miss (h=-1) when no prediction was made.
+        NOTE: _horizon_detected and _current_horizon are intentionally NOT reset here.
+        They are only reset by record_sensor_transition() (called from simulate_system
+        at each canonical sensor-detected transition) so that a prediction set before a
+        spurious estimator transition is not discarded before the true sensor event arrives.
         """
-        if self._sojourn_initialized:
-            from_state = self._sojourn_state   # state of the sojourn that just ended
-            if self._horizon_detected:
-                # Estimator predicted the transition ahead of time
-                self._horizon_history.append(self._current_horizon)
-            elif delta_k == 1:
-                # No prior prediction, but packet received at the transition step
-                self._horizon_history.append(0)
-            else:
-                # No prediction and no packet at the transition step — miss
-                self._horizon_history.append(-1)
-            self._horizon_state_history.append(from_state)
-
         self._sojourn_state = int(self.last_decision)
+        # For baseline: _aoi, _in_recovery, _recovery_end_k are intentionally preserved.
+
+    def record_sensor_transition(self, from_state, delta_k):
+        """
+        Called from simulate_system when the canonical sensor-side transition is detected.
+
+        Records one entry into _horizon_history / _horizon_state_history using the
+        estimator's current prediction state, then resets that state so the estimator
+        is ready to predict the next transition.
+
+          h > 0  : estimator had predicted this transition ahead of time (_horizon_detected)
+          h = 0  : no prior prediction, but packet received at the transition step (on-time)
+          h = -1 : no prediction and no packet at the transition step (miss)
+        """
+        if self._horizon_detected:
+            h = self._current_horizon
+        elif delta_k == 1:
+            h = 0
+        else:
+            h = -1
+        self._horizon_history.append(h)
+        self._horizon_state_history.append(int(from_state))
+        # Reset so the estimator can predict the next sojourn's transition
         self._horizon_detected = False
         self._current_horizon = None
-        # For baseline: _aoi, _in_recovery, _recovery_end_k are intentionally preserved.
 
     def _sample_t_h(self):
         """
@@ -431,7 +442,7 @@ class RemoteEstimator:
         prev_decision = self.last_decision
         self.last_decision = decision
         if decision != prev_decision:
-            self._init_sojourn(delta_k=delta_k)
+            self._init_sojourn()
 
         return self.x_hat, self.P, delta_k, decision, decision_info
 
@@ -920,6 +931,11 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
     z_hist = []
     region_hist = []
 
+    # Canonical sensor-side decision tracker.
+    # x_s and P_s come from the shared env_seq so this sequence is identical
+    # across all policies — giving a consistent transition denominator.
+    sensor_prev_decision = estimator.last_decision
+
     for k in range(T):
         # Sensor side — use pre-generated noise if env_seq provided
         if env_seq is not None:
@@ -947,6 +963,30 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
             est_kwargs["h2"]                 = env_seq["h2"][k]
             est_kwargs["chan_u"]             = env_seq["chan"][k]
         x_hat, P, delta_k, decision_est, decision_info = estimator.step(**est_kwargs)
+
+        # ------------------------------------------------------------------
+        # Canonical sensor-side transition detection.
+        # Reuses the same x_s / P_s that the sensor computed this step.
+        # Because env_seq is shared, this sequence is policy-independent.
+        # ------------------------------------------------------------------
+        sensor_info = evaluate_decision(
+            x_hat=x_s, P=P_s,
+            c=estimator.c, Delta=estimator.Delta,
+            alpha_fp=estimator.alpha_fp, alpha_fn=estimator.alpha_fn,
+            previous_decision=sensor_prev_decision,
+        )
+        if sensor_info["region"] == "confusion":
+            s_hat = float((estimator.c.T @ x_s).item())
+            sensor_decision = 1 if s_hat >= estimator.xi else 0
+        else:
+            sensor_decision = int(sensor_info["pi"])
+
+        if sensor_decision != sensor_prev_decision:
+            estimator.record_sensor_transition(
+                from_state=sensor_prev_decision,
+                delta_k=delta_k,
+            )
+            sensor_prev_decision = sensor_decision
 
         # True event
         true_value = float(estimator.c.T @ x_true)
