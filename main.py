@@ -97,19 +97,31 @@ if __name__ == "__main__":
               f"p = {prob_c['p']:.4f}, feasible = {prob_c['feasible']}"
               + (" [boundary: p=1 optimal]" if prob_c["boundary_hit"] else ""))
 
+        aoii_c = calibration["aoii"]
+        aoii_warn = (" [INFEASIBLE — no W satisfies energy constraint]"
+                     if not aoii_c["feasible"] else "")
+        print(f"  aoii               : p_t = {aoii_c['p_t']:.4f}, "
+              f"W = {aoii_c['W']}, rate = {aoii_c['rate']:.4f}, "
+              f"P_miss = {aoii_c['p_miss']:.4f}, feasible = {aoii_c['feasible']}{aoii_warn}")
+
         policy_p_t = {
             "resilient_predictive": p_t_star,
             "predictive":           calibration["predictive"]["p_t"],
             "event_trigger":        calibration["event"]["p_t"],
             "probability":          calibration["probability"]["p_t"],
+            "aoii":                 calibration["aoii"]["p_t"],
         }
         p_prob_calibrated = calibration["probability"]["p"]
         r_pred            = calibration["predictive"]["rate"]
+        W_aoii            = calibration["aoii"]["W"]
+        r_aoii            = calibration["aoii"]["rate"]
     else:
         policy_p_t = {k: float(P_T) for k in
-                      ["resilient_predictive", "predictive", "event_trigger", "probability"]}
+                      ["resilient_predictive", "predictive", "event_trigger", "probability", "aoii"]}
         p_prob_calibrated = 0.3
         r_pred = 2.0 * q01 * q10 / (q01 + q10)
+        W_aoii = 1
+        r_aoii = r_pred
 
     # ------------------------------------------------------------------
     # Baseline AoI thresholds
@@ -204,6 +216,12 @@ if __name__ == "__main__":
             dict(theta_0=theta_0, theta_1=theta_1),
             dict(p_prob=p_prob_calibrated),
         ),
+        (
+            "aoii",
+            "aoii",
+            dict(theta_0=pred_th["theta_0"], theta_1=pred_th["theta_1"]),
+            dict(W=W_aoii),
+        ),
     ]
 
     all_results = {}
@@ -237,6 +255,7 @@ if __name__ == "__main__":
             p_u0=pol_kwargs.get("p_u0", 0.0),
             p_u1=pol_kwargs.get("p_u1", 0.0),
             p_prob=pol_kwargs.get("p_prob", p_prob_calibrated),
+            W=pol_kwargs.get("W", 1),
         )
 
         results = simulate_system(
@@ -251,6 +270,7 @@ if __name__ == "__main__":
         results["p_t"]  = p_t_for_policy
         results["rate"] = (r_prop if policy_type == "resilient_predictive"
                            else r_pred if policy_type in ("predictive", "event_trigger")
+                           else r_aoii if policy_type == "aoii"
                            else p_prob_calibrated)
         all_results[name] = results
 
@@ -316,5 +336,18 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # plot_results(all_results["resilient_predictive"], Delta)
     # plot_results(all_results["probability"], Delta)
-    plot_horizon_histograms(all_results)
-    
+    # plot_horizon_histograms(all_results)
+
+    policy_names = [
+        "resilient_predictive",
+        "predictive",
+        "event_trigger",
+        "probability",
+        "aoii",
+    ]
+
+    export_horizon_histogram_full_csv(
+        all_results,
+        policy_names=policy_names,
+        filename="data/predicted_horizon_histogram_full.csv",
+    )

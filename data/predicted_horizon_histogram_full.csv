@@ -1,0 +1,37 @@
+policy_id;policy;policy_display;from_state;transition_label;transition_tex;L_value;L_label;bar_type;color_id;count;n_total;n_miss;n_ontime;n_early;min_L;max_L
+0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;-1;miss;miss;0;3;44;3;16;25;-1;2
+0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;0;0;ontime;1;16;44;3;16;25;-1;2
+0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;1;1;early;2;21;44;3;16;25;-1;2
+0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;2;2;early;2;4;44;3;16;25;-1;2
+0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;-1;miss;miss;0;2;44;2;8;34;-1;2
+0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;0;0;ontime;1;8;44;2;8;34;-1;2
+0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;1;1;early;2;25;44;2;8;34;-1;2
+0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;2;2;early;2;9;44;2;8;34;-1;2
+1;predictive;Predictive;0;0to1;$0\to1$;-1;miss;miss;0;7;44;7;14;23;-1;2
+1;predictive;Predictive;0;0to1;$0\to1$;0;0;ontime;1;14;44;7;14;23;-1;2
+1;predictive;Predictive;0;0to1;$0\to1$;1;1;early;2;19;44;7;14;23;-1;2
+1;predictive;Predictive;0;0to1;$0\to1$;2;2;early;2;4;44;7;14;23;-1;2
+1;predictive;Predictive;1;1to0;$1\to0$;-1;miss;miss;0;9;44;9;7;28;-1;2
+1;predictive;Predictive;1;1to0;$1\to0$;0;0;ontime;1;7;44;9;7;28;-1;2
+1;predictive;Predictive;1;1to0;$1\to0$;1;1;early;2;19;44;9;7;28;-1;2
+1;predictive;Predictive;1;1to0;$1\to0$;2;2;early;2;9;44;9;7;28;-1;2
+2;event_trigger;Event trigger;0;0to1;$0\to1$;-1;miss;miss;0;7;44;7;37;0;-1;0
+2;event_trigger;Event trigger;0;0to1;$0\to1$;0;0;ontime;1;37;44;7;37;0;-1;0
+2;event_trigger;Event trigger;1;1to0;$1\to0$;-1;miss;miss;0;8;44;8;36;0;-1;0
+2;event_trigger;Event trigger;1;1to0;$1\to0$;0;0;ontime;1;36;44;8;36;0;-1;0
+3;probability;Probability;0;0to1;$0\to1$;-1;miss;miss;0;7;44;7;14;23;-1;2
+3;probability;Probability;0;0to1;$0\to1$;0;0;ontime;1;14;44;7;14;23;-1;2
+3;probability;Probability;0;0to1;$0\to1$;1;1;early;2;19;44;7;14;23;-1;2
+3;probability;Probability;0;0to1;$0\to1$;2;2;early;2;4;44;7;14;23;-1;2
+3;probability;Probability;1;1to0;$1\to0$;-1;miss;miss;0;2;44;2;9;33;-1;2
+3;probability;Probability;1;1to0;$1\to0$;0;0;ontime;1;9;44;2;9;33;-1;2
+3;probability;Probability;1;1to0;$1\to0$;1;1;early;2;24;44;2;9;33;-1;2
+3;probability;Probability;1;1to0;$1\to0$;2;2;early;2;9;44;2;9;33;-1;2
+4;aoii;AoII;0;0to1;$0\to1$;-1;miss;miss;0;13;44;13;13;18;-1;2
+4;aoii;AoII;0;0to1;$0\to1$;0;0;ontime;1;13;44;13;13;18;-1;2
+4;aoii;AoII;0;0to1;$0\to1$;1;1;early;2;15;44;13;13;18;-1;2
+4;aoii;AoII;0;0to1;$0\to1$;2;2;early;2;3;44;13;13;18;-1;2
+4;aoii;AoII;1;1to0;$1\to0$;-1;miss;miss;0;7;44;7;9;28;-1;2
+4;aoii;AoII;1;1to0;$1\to0$;0;0;ontime;1;9;44;7;9;28;-1;2
+4;aoii;AoII;1;1to0;$1\to0$;1;1;early;2;21;44;7;9;28;-1;2
+4;aoii;AoII;1;1to0;$1\to0$;2;2;early;2;7;44;7;9;28;-1;2

@@ -20,7 +20,7 @@ dt = 1.0                               # Sampling time
 # SIMULATION
 # =============================================================================
 
-T       = 10000                         # Total simulation steps
+T       = 1000                         # Total simulation steps
 Delta   = 5.0                          # Disruption magnitude
 epsilon = 0.01                          # Perturbation parameter
 

@@ -815,8 +815,9 @@ def build_resilient_predictive_policy(A, Q, c, Delta, alpha_fp, alpha_fn, ell, x
 #   "resilient_predictive"  -> ResilientPredictivePolicy  (requires p_u0, p_u1)
 #   "probability"           -> ProbabilityPolicy          (requires p_prob)
 #   "event_trigger"         -> EventTriggerPolicy         (transmit only on decision transition)
+#   "aoii"                  -> AoIIPolicy                 (W-slot retransmit window, no feedback)
 def build_policy(policy_type, A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi,
-                 initial_decision=0, p_t=20.0, p_u0=0.0, p_u1=0.0, p_prob=1.0):
+                 initial_decision=0, p_t=20.0, p_u0=0.0, p_u1=0.0, p_prob=1.0, W=1):
     if policy_type == "predictive":
         return build_predictive_policy(
             A=A, Q=Q, c=c, Delta=Delta,
@@ -841,8 +842,15 @@ def build_policy(policy_type, A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi,
             xi=xi,
             initial_decision=initial_decision, p_t=p_t,
         )
+    if policy_type == "aoii":
+        return build_aoii_policy(
+            c=c, Delta=Delta,
+            alpha_fp=alpha_fp, alpha_fn=alpha_fn,
+            xi=xi, W=W,
+            initial_decision=initial_decision, p_t=p_t,
+        )
     raise ValueError(f"Unknown policy_type '{policy_type}'. "
-                     f"Choose 'predictive', 'resilient_predictive', 'probability', or 'event_trigger'.")
+                     f"Choose 'predictive', 'resilient_predictive', 'probability', 'event_trigger', or 'aoii'.")
 
 def generate_env_sequences(T, n, m, Q, R, A, c, Delta, x_true0, p_r=0.0):
     """
@@ -1508,3 +1516,225 @@ def build_event_trigger_policy(c, Delta, alpha_fp, alpha_fn, xi, initial_decisio
         initial_decision=initial_decision,
         p_t=p_t,
     )
+
+class AoIIPolicy:
+    """
+    AoII-based transmission policy (no ACK/NACK feedback).
+
+    After detecting a local transition (local decision changes), the sensor
+    transmits every slot for W consecutive slots to maximise the chance that
+    at least one packet reaches the estimator.  After W slots it goes silent
+    until the next transition.
+
+    If a new transition occurs during an active retransmission window the
+    window resets: a fresh W-slot burst starts from the new transition.
+    """
+
+    def __init__(self, c, Delta, alpha_fp, alpha_fn, xi, W,
+                 initial_decision=0, p_t=20.0):
+        self.c = np.asarray(c, dtype=float).reshape(-1, 1)
+        self.Delta = float(Delta)
+        self.alpha_fp = float(alpha_fp)
+        self.alpha_fn = float(alpha_fn)
+        self.xi = float(xi)
+        self.p_t = float(p_t)
+        self.W = int(W)
+
+        self.last_local_decision = int(initial_decision)
+        self.last_prediction = None
+
+        self._retx_remaining = 0
+
+    def _current_sensor_decision(self, x_s, P_s):
+        info = evaluate_decision(
+            x_hat=x_s,
+            P=P_s,
+            c=self.c,
+            Delta=self.Delta,
+            alpha_fp=self.alpha_fp,
+            alpha_fn=self.alpha_fn,
+            previous_decision=self.last_local_decision,
+        )
+        if info["region"] == "confusion":
+            s_hat = float((self.c.T @ x_s).item())
+            info["pi"] = 1 if s_hat >= self.xi else 0
+            info["used_xi_inside_confusion"] = True
+        else:
+            info["used_xi_inside_confusion"] = False
+        return info
+
+    def __call__(self, x_true, x_s, P_s, x_hat_remote, P_remote, k):
+        local_info = self._current_sensor_decision(x_s, P_s)
+        m_k = int(local_info["pi"])
+
+        state_changed = (m_k != self.last_local_decision)
+        if state_changed:
+            self.last_local_decision = m_k
+            self._retx_remaining = self.W
+
+        if self._retx_remaining > 0:
+            self._retx_remaining -= 1
+            self.last_prediction = {
+                "found_transition": True,
+                "reason": "aoii_retransmit",
+                "predicted_horizon": 0,
+                "decision_now": m_k,
+            }
+            return 1
+
+        self.last_prediction = {
+            "found_transition": False,
+            "reason": "aoii_silent",
+            "predicted_horizon": None,
+        }
+        return 0
+
+
+def build_aoii_policy(c, Delta, alpha_fp, alpha_fn, xi, W,
+                      initial_decision=0, p_t=20.0):
+    return AoIIPolicy(
+        c=c, Delta=Delta,
+        alpha_fp=alpha_fp, alpha_fn=alpha_fn,
+        xi=xi, W=W,
+        initial_decision=initial_decision, p_t=p_t,
+    )
+
+def export_horizon_histogram_full_csv(
+    all_results,
+    policy_names=None,
+    filename="data/predicted_horizon_histogram_full.csv",
+):
+    """
+    Export one complete CSV for LaTeX plotting.
+
+    This file contains enough information for:
+      - raw histogram bars
+      - legend counts
+      - tick labels
+      - policy/state filtering
+      - color classification
+
+    Important:
+      L_value:
+        -1 = miss
+         0 = on-time
+        >0 = predicted horizon
+
+      color_id:
+        0 = miss
+        1 = L = 0
+        2 = L > 0
+    """
+    import csv
+    from collections import Counter
+
+    if policy_names is None:
+        policy_names = list(all_results.keys())
+
+    display_names = {
+        "resilient_predictive": "Resilient predictive",
+        "predictive": "Predictive",
+        "event_trigger": "Event trigger",
+        "probability": "Probability",
+        "aoii": "AoII",
+    }
+
+    rows = []
+
+    for policy_id, policy_name in enumerate(policy_names):
+        res = all_results[policy_name]
+        L_per_state = res.get("L_per_state", {0: [], 1: []})
+
+        for from_state in [0, 1]:
+            transition_label = "0to1" if from_state == 0 else "1to0"
+            transition_tex = r"$0\to1$" if from_state == 0 else r"$1\to0$"
+
+            L_list = [int(L) for L in L_per_state.get(from_state, [])]
+
+            n_total = len(L_list)
+            n_miss = sum(1 for L in L_list if L < 0)
+            n_ontime = sum(1 for L in L_list if L == 0)
+            n_early = sum(1 for L in L_list if L > 0)
+
+            counts = Counter()
+            for L in L_list:
+                if L < 0:
+                    counts[-1] += 1
+                else:
+                    counts[L] += 1
+
+            if counts:
+                min_L = min(counts.keys())
+                max_L = max(counts.keys())
+            else:
+                min_L = -1
+                max_L = 0
+
+            # This writes only bars that exist.
+            # No fake ticks 4,5,6,... unless they appear in the data.
+            for L_value in sorted(counts.keys()):
+                if L_value < 0:
+                    bar_type = "miss"
+                    L_label = "miss"
+                    color_id = 0
+                elif L_value == 0:
+                    bar_type = "ontime"
+                    L_label = "0"
+                    color_id = 1
+                else:
+                    bar_type = "early"
+                    L_label = str(L_value)
+                    color_id = 2
+
+                rows.append({
+                    "policy_id": policy_id,
+                    "policy": policy_name,
+                    "policy_display": display_names.get(policy_name, policy_name),
+                    "from_state": from_state,
+                    "transition_label": transition_label,
+                    "transition_tex": transition_tex,
+                    "L_value": L_value,
+                    "L_label": L_label,
+                    "bar_type": bar_type,
+                    "color_id": color_id,
+                    "count": counts[L_value],
+
+                    # repeated summary fields, useful for legend
+                    "n_total": n_total,
+                    "n_miss": n_miss,
+                    "n_ontime": n_ontime,
+                    "n_early": n_early,
+
+                    # useful for axis limits if you want to generate them automatically later
+                    "min_L": min_L,
+                    "max_L": max_L,
+                })
+
+    with open(filename, mode="w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "policy_id",
+                "policy",
+                "policy_display",
+                "from_state",
+                "transition_label",
+                "transition_tex",
+                "L_value",
+                "L_label",
+                "bar_type",
+                "color_id",
+                "count",
+                "n_total",
+                "n_miss",
+                "n_ontime",
+                "n_early",
+                "min_L",
+                "max_L",
+            ],
+            delimiter=";",
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print(f"Saved full horizon histogram CSV to: {filename}")

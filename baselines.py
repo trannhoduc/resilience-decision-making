@@ -132,6 +132,48 @@ def calibrate_baselines(
         f"product={p_t_prob * p_prob:.8f}, E={E:.8f}"
     )
 
+    # ------------------------------------------------------------------
+    # 4.  AoII — fixed W-slot retransmission window (no ACK/NACK feedback)
+    #
+    # Each transition triggers a burst of W transmissions.  The actual
+    # average transmission rate is capped at 1 (at most one packet/slot):
+    #
+    #   actual_rate(W) = min(2W / cycle_length, 1)
+    #
+    # Energy constraint:  p_t * actual_rate = E  =>
+    #
+    #   p_t_aoii(W) = E / actual_rate(W)
+    #               = E * cycle_length / (2W)        when 2W <= cycle_length
+    #               = E                               when 2W >  cycle_length
+    #
+    # Joint optimisation: choose W to minimise the probability that ALL W
+    # transmissions fail,  P_miss = eps_bar(p_t_aoii(W))^W.
+    # ------------------------------------------------------------------
+    cycle_length = 1.0 / q01 + 1.0 / q10
+
+    best_W      = None
+    best_p_miss = 1.0
+    best_p_t_aoii = None
+
+    for W_cand in range(1, 50):
+        actual_rate = min(2.0 * W_cand / cycle_length, 1.0)
+        p_t_cand    = E / actual_rate
+        if p_t_cand <= 0 or p_t_cand > p_t_max:
+            continue
+        eps      = float(epsilon_bar_fn(p_t_cand))
+        p_miss   = eps ** W_cand
+        if p_miss < best_p_miss:
+            best_p_miss   = p_miss
+            best_W        = W_cand
+            best_p_t_aoii = p_t_cand
+
+    if best_W is None:
+        aoii_feasible = False
+        best_W        = 1
+        best_p_t_aoii = E * cycle_length / 2.0
+    else:
+        aoii_feasible = True
+
     return {
         "predictive": {
             "p_t":      p_t_pred,
@@ -148,6 +190,13 @@ def calibrate_baselines(
             "p":            p_prob,
             "feasible":     feasible_prob,
             "boundary_hit": boundary_hit,
+        },
+        "aoii": {
+            "p_t":      best_p_t_aoii,
+            "W":        best_W,
+            "rate":     min(2.0 * best_W / cycle_length, 1.0),
+            "p_miss":   best_p_miss,
+            "feasible": aoii_feasible,
         },
         "energy_budget": E,
     }
