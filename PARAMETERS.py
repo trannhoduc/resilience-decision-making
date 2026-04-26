@@ -22,7 +22,7 @@ dt = 1.0                               # Sampling time
 
 T       = 1000                         # Total simulation steps
 Delta   = 5.0                          # Disruption magnitude
-epsilon = 0.01                          # Perturbation parameter
+# epsilon = 0.01                          # Perturbation parameter
 
 MU_W = np.zeros((A.shape[0], 1))       # Process-noise mean (Assumption 1)
 
@@ -64,8 +64,8 @@ P_T = 20
 # RECOVERY MODEL
 # =============================================================================
 
-P_R               = 0.01              # Recovery probability per step
-EPSILON_L         = 0.05             # Loss probability threshold
+P_R               = 0.001              # Recovery probability per step
+EPSILON_L         = 0.1             # Loss probability threshold
 TH_RECOVERY_LAMBDA = 4.0              # Recovery threshold lambda
 TH_RECOVERY_KAPPA  = 2.0              # Recovery threshold kappa
 

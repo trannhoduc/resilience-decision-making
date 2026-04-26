@@ -101,7 +101,7 @@ if __name__ == "__main__":
         aoii_warn = (" [INFEASIBLE — no W satisfies energy constraint]"
                      if not aoii_c["feasible"] else "")
         print(f"  aoii               : p_t = {aoii_c['p_t']:.4f}, "
-              f"W = {aoii_c['W']}, rate = {aoii_c['rate']:.4f}, "
+              f"W_0 = {aoii_c['W_0']}, W_1 = {aoii_c['W_1']}, rate = {aoii_c['rate']:.4f}, "
               f"P_miss = {aoii_c['p_miss']:.4f}, feasible = {aoii_c['feasible']}{aoii_warn}")
 
         policy_p_t = {
@@ -113,14 +113,16 @@ if __name__ == "__main__":
         }
         p_prob_calibrated = calibration["probability"]["p"]
         r_pred            = calibration["predictive"]["rate"]
-        W_aoii            = calibration["aoii"]["W"]
+        W0_aoii           = calibration["aoii"]["W_0"]
+        W1_aoii           = calibration["aoii"]["W_1"]
         r_aoii            = calibration["aoii"]["rate"]
     else:
         policy_p_t = {k: float(P_T) for k in
                       ["resilient_predictive", "predictive", "event_trigger", "probability", "aoii"]}
         p_prob_calibrated = 0.3
         r_pred = 2.0 * q01 * q10 / (q01 + q10)
-        W_aoii = 1
+        W0_aoii = 1
+        W1_aoii = 1
         r_aoii = r_pred
 
     # ------------------------------------------------------------------
@@ -220,7 +222,7 @@ if __name__ == "__main__":
             "aoii",
             "aoii",
             dict(theta_0=pred_th["theta_0"], theta_1=pred_th["theta_1"]),
-            dict(W=W_aoii),
+            dict(W_0=W0_aoii, W_1=W1_aoii),
         ),
     ]
 
@@ -255,7 +257,8 @@ if __name__ == "__main__":
             p_u0=pol_kwargs.get("p_u0", 0.0),
             p_u1=pol_kwargs.get("p_u1", 0.0),
             p_prob=pol_kwargs.get("p_prob", p_prob_calibrated),
-            W=pol_kwargs.get("W", 1),
+            W_0=pol_kwargs.get("W_0", 1),
+            W_1=pol_kwargs.get("W_1", 1),
         )
 
         results = simulate_system(
@@ -336,7 +339,7 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # plot_results(all_results["resilient_predictive"], Delta)
     # plot_results(all_results["probability"], Delta)
-    # plot_horizon_histograms(all_results)
+    plot_horizon_histograms(all_results)
 
     policy_names = [
         "resilient_predictive",

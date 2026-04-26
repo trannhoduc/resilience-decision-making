@@ -817,7 +817,7 @@ def build_resilient_predictive_policy(A, Q, c, Delta, alpha_fp, alpha_fn, ell, x
 #   "event_trigger"         -> EventTriggerPolicy         (transmit only on decision transition)
 #   "aoii"                  -> AoIIPolicy                 (W-slot retransmit window, no feedback)
 def build_policy(policy_type, A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi,
-                 initial_decision=0, p_t=20.0, p_u0=0.0, p_u1=0.0, p_prob=1.0, W=1):
+                 initial_decision=0, p_t=20.0, p_u0=0.0, p_u1=0.0, p_prob=1.0, W_0=1, W_1=1):
     if policy_type == "predictive":
         return build_predictive_policy(
             A=A, Q=Q, c=c, Delta=Delta,
@@ -846,7 +846,7 @@ def build_policy(policy_type, A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi,
         return build_aoii_policy(
             c=c, Delta=Delta,
             alpha_fp=alpha_fp, alpha_fn=alpha_fn,
-            xi=xi, W=W,
+            xi=xi, W_0=W_0, W_1=W_1,
             initial_decision=initial_decision, p_t=p_t,
         )
     raise ValueError(f"Unknown policy_type '{policy_type}'. "
@@ -1521,16 +1521,16 @@ class AoIIPolicy:
     """
     AoII-based transmission policy (no ACK/NACK feedback).
 
-    After detecting a local transition (local decision changes), the sensor
-    transmits every slot for W consecutive slots to maximise the chance that
-    at least one packet reaches the estimator.  After W slots it goes silent
-    until the next transition.
+    After detecting a local transition INTO state s, the sensor transmits
+    for W_s consecutive slots to maximise the chance that at least one
+    packet reaches the estimator.  After W_s slots it goes silent until
+    the next transition.
 
     If a new transition occurs during an active retransmission window the
-    window resets: a fresh W-slot burst starts from the new transition.
+    window resets: a fresh W_s-slot burst starts from the new transition.
     """
 
-    def __init__(self, c, Delta, alpha_fp, alpha_fn, xi, W,
+    def __init__(self, c, Delta, alpha_fp, alpha_fn, xi, W_0, W_1,
                  initial_decision=0, p_t=20.0):
         self.c = np.asarray(c, dtype=float).reshape(-1, 1)
         self.Delta = float(Delta)
@@ -1538,7 +1538,8 @@ class AoIIPolicy:
         self.alpha_fn = float(alpha_fn)
         self.xi = float(xi)
         self.p_t = float(p_t)
-        self.W = int(W)
+        self.W_0 = int(W_0)
+        self.W_1 = int(W_1)
 
         self.last_local_decision = int(initial_decision)
         self.last_prediction = None
@@ -1570,7 +1571,7 @@ class AoIIPolicy:
         state_changed = (m_k != self.last_local_decision)
         if state_changed:
             self.last_local_decision = m_k
-            self._retx_remaining = self.W
+            self._retx_remaining = self.W_0 if m_k == 0 else self.W_1
 
         if self._retx_remaining > 0:
             self._retx_remaining -= 1
@@ -1590,12 +1591,12 @@ class AoIIPolicy:
         return 0
 
 
-def build_aoii_policy(c, Delta, alpha_fp, alpha_fn, xi, W,
+def build_aoii_policy(c, Delta, alpha_fp, alpha_fn, xi, W_0, W_1,
                       initial_decision=0, p_t=20.0):
     return AoIIPolicy(
         c=c, Delta=Delta,
         alpha_fp=alpha_fp, alpha_fn=alpha_fn,
-        xi=xi, W=W,
+        xi=xi, W_0=W_0, W_1=W_1,
         initial_decision=initial_decision, p_t=p_t,
     )
 

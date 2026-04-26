@@ -133,46 +133,95 @@ def calibrate_baselines(
     )
 
     # ------------------------------------------------------------------
-    # 4.  AoII — fixed W-slot retransmission window (no ACK/NACK feedback)
+    # 4. AoII — per-state retransmission windows (no ACK/NACK feedback)
     #
-    # Each transition triggers a burst of W transmissions.  The actual
-    # average transmission rate is capped at 1 (at most one packet/slot):
+    # After transition INTO state s, sensor transmits for W_s slots.
+    # Actual packets sent = min(W_s, T_s) since sojourn may end early.
+    # W_s is capped at floor(E[T_s]) to prevent degeneration.
     #
-    #   actual_rate(W) = min(2W / cycle_length, 1)
+    # E[min(W_s, T_s)] = (1 - q_ss^W_s) / q_{s,1-s}
+    #   where q_ss = 1 - q_{s,1-s}
     #
-    # Energy constraint:  p_t * actual_rate = E  =>
-    #
-    #   p_t_aoii(W) = E / actual_rate(W)
-    #               = E * cycle_length / (2W)        when 2W <= cycle_length
-    #               = E                               when 2W >  cycle_length
-    #
-    # Joint optimisation: choose W to minimise the probability that ALL W
-    # transmissions fail,  P_miss = eps_bar(p_t_aoii(W))^W.
+    # Rate: r = (E[min(W0,T0)] + E[min(W1,T1)]) / cycle_length
+    # Energy: p_t * r = E
+    # Miss prob per state:
+    #   P_miss_s = (1-q_ss)*eps*(1-(q_ss*eps)^W_s)/(1-q_ss*eps) + (q_ss*eps)^W_s
+    # Weighted: P_miss = pi_0 * P_miss_0 + pi_1 * P_miss_1
     # ------------------------------------------------------------------
     cycle_length = 1.0 / q01 + 1.0 / q10
+    q00 = 1.0 - q01
+    q11 = 1.0 - q10
+    pi_0 = q10 / (q01 + q10)
+    pi_1 = q01 / (q01 + q10)
 
-    best_W      = None
-    best_p_miss = 1.0
+    W0_max = int(math.floor(1.0 / q01))   # floor(E[T_0])
+    W1_max = int(math.floor(1.0 / q10))   # floor(E[T_1])
+    # Ensure at least 1
+    W0_max = max(W0_max, 1)
+    W1_max = max(W1_max, 1)
+
+    def expected_min_W_T(W_s, q_ss, q_s_other):
+        """E[min(W_s, T_s)] where T_s ~ Geom(q_{s,1-s})"""
+        if W_s <= 0:
+            return 0.0
+        return (1.0 - q_ss ** W_s) / q_s_other
+
+    def p_miss_state(W_s, q_ss, eps):
+        """P(all min(W_s, T_s) packets fail)"""
+        if W_s <= 0 or eps <= 0:
+            return 0.0
+        if eps >= 1.0:
+            return 1.0
+        q_ss_eps = q_ss * eps
+        if abs(1.0 - q_ss_eps) < 1e-15:
+            # Degenerate case
+            return eps ** W_s
+        term1 = (1.0 - q_ss) * eps * (1.0 - q_ss_eps ** W_s) / (1.0 - q_ss_eps)
+        term2 = q_ss_eps ** W_s
+        return term1 + term2
+
+    best_W0 = None
+    best_W1 = None
+    best_p_miss_aoii = 1.0
     best_p_t_aoii = None
 
-    for W_cand in range(1, 50):
-        actual_rate = min(2.0 * W_cand / cycle_length, 1.0)
-        p_t_cand    = E / actual_rate
-        if p_t_cand <= 0 or p_t_cand > p_t_max:
-            continue
-        eps      = float(epsilon_bar_fn(p_t_cand))
-        p_miss   = eps ** W_cand
-        if p_miss < best_p_miss:
-            best_p_miss   = p_miss
-            best_W        = W_cand
-            best_p_t_aoii = p_t_cand
+    for W0_cand in range(1, W0_max + 1):
+        for W1_cand in range(1, W1_max + 1):
+            e_min_0 = expected_min_W_T(W0_cand, q00, q01)
+            e_min_1 = expected_min_W_T(W1_cand, q11, q10)
+            rate_cand = (e_min_0 + e_min_1) / cycle_length
 
-    if best_W is None:
+            if rate_cand <= 0:
+                continue
+
+            p_t_cand = E / rate_cand
+            if p_t_cand <= 0 or p_t_cand > p_t_max:
+                continue
+
+            eps = float(epsilon_bar_fn(p_t_cand))
+            pm0 = p_miss_state(W0_cand, q00, eps)
+            pm1 = p_miss_state(W1_cand, q11, eps)
+            p_miss_cand = pi_0 * pm0 + pi_1 * pm1
+
+            if p_miss_cand < best_p_miss_aoii:
+                best_p_miss_aoii = p_miss_cand
+                best_W0 = W0_cand
+                best_W1 = W1_cand
+                best_p_t_aoii = p_t_cand
+
+    if best_W0 is None:
         aoii_feasible = False
-        best_W        = 1
-        best_p_t_aoii = E * cycle_length / 2.0
+        best_W0 = 1
+        best_W1 = 1
+        e0 = expected_min_W_T(1, q00, q01)
+        e1 = expected_min_W_T(1, q11, q10)
+        best_p_t_aoii = E / ((e0 + e1) / cycle_length)
     else:
         aoii_feasible = True
+
+    e_min_0_best = expected_min_W_T(best_W0, q00, q01)
+    e_min_1_best = expected_min_W_T(best_W1, q11, q10)
+    rate_aoii = (e_min_0_best + e_min_1_best) / cycle_length
 
     return {
         "predictive": {
@@ -193,9 +242,10 @@ def calibrate_baselines(
         },
         "aoii": {
             "p_t":      best_p_t_aoii,
-            "W":        best_W,
-            "rate":     min(2.0 * best_W / cycle_length, 1.0),
-            "p_miss":   best_p_miss,
+            "W_0":      best_W0,
+            "W_1":      best_W1,
+            "rate":     rate_aoii,
+            "p_miss":   best_p_miss_aoii,
             "feasible": aoii_feasible,
         },
         "energy_budget": E,
