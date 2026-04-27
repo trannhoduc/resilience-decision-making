@@ -775,6 +775,8 @@ def estimate_predictive_horizon_moments(
         "I_0_samples": I_0,
         "I_1_samples": I_1,
         "E_I_0": float(np.mean(I_0)),
+        "E_I_0_L0": np.mean(I_0[I_0 > 0]),
+        "E_I_1_L0": np.mean(I_1[I_1 > 0]),
         "E_I_1": float(np.mean(I_1)),
         "num_samples_0": int(I_0.size),
         "num_samples_1": int(I_1.size),
@@ -1339,6 +1341,7 @@ if __name__ == "__main__":
             print(k, v)
     else:
         best = solution["best_design"]
+        stats = solution["predictive_stats"]
         print(f"theta0             : {best['theta0']}")
         print(f"theta1             : {best['theta1']}")
         print(f"pt*                : {best['pt']:.6f}")
@@ -1349,6 +1352,8 @@ if __name__ == "__main__":
         print(f"pu1*               : {best['pu1_star']:.6f}")
         print(f"E[I0]              : {best['E_I_0']:.6f}")
         print(f"E[I1]              : {best['E_I_1']:.6f}")
+        print(f"E[I0_L>0]          : {stats['E_I_0_L0']:.6f}")
+        print(f"E[I1_L>0]          : {stats['E_I_1_L0']:.6f}")
         print(f"E[q00^I0]          : {best['E_q00_pow_I0']:.6f}")
         print(f"E[q11^I1]          : {best['E_q11_pow_I1']:.6f}")
         print(f"Gamma0             : {best['Gamma_0']:.6f}")
