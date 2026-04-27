@@ -1,9 +1,8 @@
 import math
-
 from PARAMETERS import *
 from model import *
 from computation import evaluate_decision, precompute_all
-from resilience_design import solve_resilience_design, compute_average_packet_error_closed_form
+from resilience_design_gpt import solve_resilience_design, compute_average_packet_error_closed_form
 from baselines import calibrate_baselines, compute_baseline_thresholds
 
 
@@ -216,6 +215,7 @@ if __name__ == "__main__":
             "probability",
             dict(theta_0=baseline_thresholds["probability"]["theta"],
                  theta_1=baseline_thresholds["probability"]["theta"]),
+            #dict(theta_0=theta_0, theta_1=theta_1),
             dict(p_prob=p_prob_calibrated),
         ),
         (
@@ -337,7 +337,7 @@ if __name__ == "__main__":
     # ------------------------------------------------------------------
     # Plots
     # ------------------------------------------------------------------
-    # plot_results(all_results["resilient_predictive"], Delta)
+    plot_results(all_results["resilient_predictive"], Delta)
     # plot_results(all_results["probability"], Delta)
     plot_horizon_histograms(all_results)
 

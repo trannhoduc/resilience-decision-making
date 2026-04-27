@@ -758,88 +758,110 @@ def evaluate_resilience_design(
     avg_eps_info = compute_average_packet_error(pt=pt, params=params, method=average_eps_method)
     eps_bar = float(avg_eps_info["eps_bar"])
 
-    # First compute outage-induced term in (19) without eps_r because D_theta needs eta_s.
-    # We use the active-constraint logic iteratively in one simple fixed-point pass:
-    #   1) initialize eps_d from outage + packet-error term using eta_s=1 (optimistic),
-    #   2) compute eps_r, pu_s, eta_s, E[D_theta,s],
-    #   3) recompute outage term and eps_d.
-    # This keeps the code simple and numerically stable.
-    eps_d_init = pr * 0.0 + (1.0 - pr) * eps_bar
-    eps_r_init = compute_eps_r_from_eps_d(eps_l=eps_l, eps_d=eps_d_init)
+    # -----------------------------------------------------------------
+    # Iterative fixed-point: eps_d -> eps_r -> pu -> eta -> D_theta
+    #                        -> Gamma -> eps_d (repeat until stable)
+    #
+    # The coupling: D_theta depends on eta, which depends on eps_r,
+    # which depends on eps_d, which depends on D_theta. A single pass
+    # uses D_theta from an optimistic eps_r and never corrects it.
+    # The fix: iterate until eps_d converges.
+    # -----------------------------------------------------------------
+    MAX_FP_ITER = int(_get_param(params, "MAX_FP_ITER", 15))
+    FP_TOL = 1e-8
 
-    pu0_info = compute_pu_star(theta_s=theta0, eps_r=eps_r_init, eps_bar=eps_bar)
-    pu1_info = compute_pu_star(theta_s=theta1, eps_r=eps_r_init, eps_bar=eps_bar)
+    # Optimistic initialisation: ignore outage contribution entirely
+    eps_d = (1.0 - pr) * eps_bar
 
-    if not pu0_info["feasible"] or not pu1_info["feasible"]:
-        return {
-            "feasible": False,
-            "reason": "pu_star_infeasible_initial",
-            "pt": float(pt),
-            "theta0": theta0,
-            "theta1": theta1,
-            "eps_bar": eps_bar,
-        }
+    # These will be set by the loop
+    pu0 = pu1 = eta0 = eta1 = 0.0
+    E_D_theta_0 = E_D_theta_1 = 0.0
+    outage0 = outage1 = {"Gamma_s": 0.0}
+    converged = False
+    _fp_iter = 0
 
-    pu0 = float(pu0_info["pu_star"])
-    pu1 = float(pu1_info["pu_star"])
-    eta0 = pu0 * (1.0 - eps_bar)
-    eta1 = pu1 * (1.0 - eps_bar)
+    for _fp_iter in range(MAX_FP_ITER):
+        # --- eps_r from current eps_d ---
+        eps_r = compute_eps_r_from_eps_d(eps_l=eps_l, eps_d=eps_d)
+        if not (0.0 < eps_r < 1.0):
+            return {
+                "feasible": False,
+                "reason": f"eps_r_out_of_bounds_iter{_fp_iter}",
+                "pt": float(pt), "theta0": theta0, "theta1": theta1,
+                "eps_bar": eps_bar, "eps_d": eps_d, "eps_r": eps_r,
+            }
 
-    E_D_theta_0 = compute_expected_D_theta(theta_s=theta0, eta_s=eta0)
-    E_D_theta_1 = compute_expected_D_theta(theta_s=theta1, eta_s=eta1)
+        # --- pu_star from eps_r ---
+        pu0_info = compute_pu_star(theta_s=theta0, eps_r=eps_r, eps_bar=eps_bar)
+        pu1_info = compute_pu_star(theta_s=theta1, eps_r=eps_r, eps_bar=eps_bar)
+        if not pu0_info["feasible"] or not pu1_info["feasible"]:
+            return {
+                "feasible": False,
+                "reason": f"pu_star_infeasible_iter{_fp_iter}",
+                "pt": float(pt), "theta0": theta0, "theta1": theta1,
+                "eps_bar": eps_bar, "eps_d": eps_d, "eps_r": eps_r,
+            }
 
-    outage0 = compute_outage_term_state(
-        theta_s=theta0,
-        q_ss=q00,
-        E_I_s=float(predictive_stats["E_I_0"]),
-        E_D_theta_s=E_D_theta_0,
-        weibull_lambda=lam,
-        weibull_kappa=kappa,
-    )
-    outage1 = compute_outage_term_state(
-        theta_s=theta1,
-        q_ss=q11,
-        E_I_s=float(predictive_stats["E_I_1"]),
-        E_D_theta_s=E_D_theta_1,
-        weibull_lambda=lam,
-        weibull_kappa=kappa,
-    )
+        pu0 = float(pu0_info["pu_star"])
+        pu1 = float(pu1_info["pu_star"])
+        eta0 = pu0 * (1.0 - eps_bar)
+        eta1 = pu1 * (1.0 - eps_bar)
 
-    eps_d = compute_eps_d(
-        pr=pr,
-        pi0=pi0,
-        pi1=pi1,
-        outage_term_0=outage0["Gamma_s"],
-        outage_term_1=outage1["Gamma_s"],
-        eps_bar=eps_bar,
-    )
+        # --- D_theta from eta ---
+        E_D_theta_0 = compute_expected_D_theta(theta_s=theta0, eta_s=eta0)
+        E_D_theta_1 = compute_expected_D_theta(theta_s=theta1, eta_s=eta1)
 
+        # --- Gamma (outage term) from D_theta ---
+        outage0 = compute_outage_term_state(
+            theta_s=theta0, q_ss=q00,
+            E_I_s=float(predictive_stats["E_I_0"]),
+            E_D_theta_s=E_D_theta_0,
+            weibull_lambda=lam, weibull_kappa=kappa,
+        )
+        outage1 = compute_outage_term_state(
+            theta_s=theta1, q_ss=q11,
+            E_I_s=float(predictive_stats["E_I_1"]),
+            E_D_theta_s=E_D_theta_1,
+            weibull_lambda=lam, weibull_kappa=kappa,
+        )
+
+        # --- eps_d from Gamma ---
+        eps_d_new = compute_eps_d(
+            pr=pr, pi0=pi0, pi1=pi1,
+            outage_term_0=float(outage0["Gamma_s"]),
+            outage_term_1=float(outage1["Gamma_s"]),
+            eps_bar=eps_bar,
+        )
+
+        # --- Convergence check ---
+        if abs(eps_d_new - eps_d) < FP_TOL:
+            eps_d = eps_d_new
+            converged = True
+            break
+        eps_d = eps_d_new
+
+    # After loop: check feasibility with converged values
     if not (0.0 < eps_d < eps_l):
         return {
             "feasible": False,
             "reason": "eps_d_out_of_bounds",
-            "pt": float(pt),
-            "theta0": theta0,
-            "theta1": theta1,
-            "eps_bar": eps_bar,
-            "eps_d": eps_d,
-            "eps_l": eps_l,
+            "pt": float(pt), "theta0": theta0, "theta1": theta1,
+            "eps_bar": eps_bar, "eps_d": eps_d, "eps_l": eps_l,
+            "fp_converged": converged,
         }
 
+    # Final eps_r from converged eps_d
     eps_r = compute_eps_r_from_eps_d(eps_l=eps_l, eps_d=eps_d)
-
     if not (0.0 < eps_r < 1.0):
         return {
             "feasible": False,
-            "reason": "eps_r_out_of_bounds",
-            "pt": float(pt),
-            "theta0": theta0,
-            "theta1": theta1,
-            "eps_bar": eps_bar,
-            "eps_d": eps_d,
-            "eps_r": eps_r,
+            "reason": "eps_r_out_of_bounds_final",
+            "pt": float(pt), "theta0": theta0, "theta1": theta1,
+            "eps_bar": eps_bar, "eps_d": eps_d, "eps_r": eps_r,
         }
 
+    # pu0, pu1, eta0, eta1 are already consistent from the last iteration.
+    # Continue to the avg_rate computation as before.
     pu0_info = compute_pu_star(theta_s=theta0, eps_r=eps_r, eps_bar=eps_bar)
     pu1_info = compute_pu_star(theta_s=theta1, eps_r=eps_r, eps_bar=eps_bar)
 
@@ -896,6 +918,8 @@ def evaluate_resilience_design(
         "average_rate": avg_rate,
         "objective": J,
         "average_packet_error_info": avg_eps_info,
+        "fp_converged": converged,
+        "fp_iterations": _fp_iter + 1,
     }
 
 
@@ -983,19 +1007,20 @@ if __name__ == "__main__":
     from computation import precompute_all
 
     derived = precompute_all(P)
+
+    # ----------------------------------------------------------------
+    # Before/after comparison: run evaluate_resilience_design with
+    # MAX_FP_ITER=1 (old single-pass behaviour) and MAX_FP_ITER=15
+    # (converged behaviour) using the same Monte Carlo predictive stats.
+    # ----------------------------------------------------------------
+    q00 = float(derived["markov_surrogate"]["q00"])
+    q11 = float(derived["markov_surrogate"]["q11"])
+    predictive_stats = estimate_predictive_horizon_moments(params=P, derived=derived)
+    predictive_stats = add_q_power_moments_to_predictive_horizon_stats(
+        predictive_stats=predictive_stats, q00=q00, q11=q11,
+    )
+
     solution = solve_resilience_design(derived=derived, params=P)
-
-    #print("=== Quick epsilon-bar check ===")
-    #for pt in [0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]:
-    #    avg = compute_average_packet_error(pt=pt, params=P)
-    #    print(f"pt={pt:.2f}, eps_bar={avg['eps_bar']:.6f}, method={avg['method']}")
-
-    #from collections import Counter
-
-    #reasons = Counter(c["reason"] for c in solution["candidates"])
-    #print("=== Candidate failure reasons ===")
-    #for k, v in reasons.items():
-    #    print(k, v)
 
     print("=== Resilience design summary ===")
     if not solution["feasible"]:
@@ -1019,3 +1044,28 @@ if __name__ == "__main__":
         print(f"Gamma1             : {best['Gamma_1']:.6f}")
         print(f"average rate       : {best['average_rate']:.6f}")
         print(f"objective          : {best['objective']:.6f}")
+        print(f"fp_converged       : {best['fp_converged']}")
+        print(f"fp_iterations      : {best['fp_iterations']}")
+
+        # --- Before/after at the best (theta0, theta1, pt) ---
+        t0, t1, pt_best = best["theta0"], best["theta1"], best["pt"]
+        P.MAX_FP_ITER = 1
+        old_r = evaluate_resilience_design(
+            pt=pt_best, theta0=t0, theta1=t1,
+            derived=derived, params=P, predictive_stats=predictive_stats,
+        )
+        P.MAX_FP_ITER = 15
+        new_r = evaluate_resilience_design(
+            pt=pt_best, theta0=t0, theta1=t1,
+            derived=derived, params=P, predictive_stats=predictive_stats,
+        )
+
+        print(f"\n=== Before/After at best (theta0={t0}, theta1={t1}, pt={pt_best:.4f}) ===")
+        print(f"{'':20s} {'OLD (1-pass)':>18s} {'NEW (converged)':>18s}")
+        for key in ("eps_d", "eps_r", "pu0_star", "pu1_star", "objective"):
+            ov = old_r.get(key, float("nan")) if old_r.get("feasible") else float("nan")
+            nv = new_r.get(key, float("nan")) if new_r.get("feasible") else float("nan")
+            print(f"{key:20s} {ov:>18.6f} {nv:>18.6f}")
+        old_iters = old_r.get("fp_iterations", 1) if old_r.get("feasible") else 1
+        new_iters = new_r.get("fp_iterations", "?") if new_r.get("feasible") else "?"
+        print(f"{'fp_iterations':20s} {old_iters:>18} {new_iters!s:>18}")

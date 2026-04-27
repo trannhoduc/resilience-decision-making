@@ -20,7 +20,7 @@ dt = 1.0                               # Sampling time
 # SIMULATION
 # =============================================================================
 
-T       = 100000                         # Total simulation steps
+T       = 10000                         # Total simulation steps
 Delta   = 5.0                          # Disruption magnitude
 # epsilon = 0.01                          # Perturbation parameter
 
@@ -53,7 +53,7 @@ INFO_BITS_L        = 256                # Information bits L
 CHANNEL_NOISE_VAR  = 1.0               # Channel noise variance
 
 PT_MIN = 0.05                          # Minimum transmission power
-PT_MAX = 2000                            # Maximum transmission power
+PT_MAX = 200                            # Maximum transmission power
 RHO    = 50.0                          # Power budget / SNR scaling
 
 BW = 1e6                               # Bandwitch
@@ -65,7 +65,7 @@ P_T = 20
 # =============================================================================
 
 P_R               = 0.02              # Recovery probability per step
-EPSILON_L         = 0.04             # Loss probability threshold
+EPSILON_L         = 0.05             # Loss probability threshold
 TH_RECOVERY_LAMBDA = 4.0              # Recovery threshold lambda
 TH_RECOVERY_KAPPA  = 2.0              # Recovery threshold kappa
 
