@@ -255,99 +255,104 @@ def calibrate_baselines(
 def compute_baseline_thresholds(
     q01: float,
     q10: float,
-    eta_prob: float,
     epsilon_r: float,
+    calibration_results: Dict,
+    proposed_theta_0: int,
+    proposed_theta_1: int,
+    epsilon_bar_fn: Callable[[float], float],
 ) -> Dict:
     """
     Compute the AoI threshold each baseline uses to declare an outage.
 
-    All baselines share the same reliability target ``epsilon_r`` that the
-    proposed method achieves.  The thresholds are the smallest integer theta
-    such that the probability of NOT detecting an outage within theta slots
-    is <= epsilon_r.
+    Each baseline's theta is derived from that baseline's own AoI distribution
+    under normal operation, using the same false-trigger probability epsilon_r
+    across all methods.
 
     Baseline-specific formulas
     --------------------------
 
-    1. **Probability baseline** — single threshold, state-independent.
+    PROPOSED: pass-through — proposed_theta_0 and proposed_theta_1 are
+    returned unchanged from Algorithm 2.
 
-       The per-slot effective detection rate is::
+    EVENT-TRIGGERED and PREDICTIVE-ONLY (one packet per sojourn):
+        P(AoI > theta | no outage) = q_ss^theta
+        theta_s = ceil( log(epsilon_r) / log(q_ss) )
+        where q00 = 1 - q01, q11 = 1 - q10.
 
-           eta = p_prob * (1 - eps_bar(p_t_prob))
+    PROBABILITY (every slot, delivery probability eta = p_prob*(1-eps_bar(p_t_prob))):
+        P(AoI > theta) = (1 - eta)^theta
+        theta = ceil( log(epsilon_r) / log(1 - eta) )
+        State-independent (single theta for both states).
 
-       passed in as ``eta_prob``.  The threshold is then the
-       (1 - epsilon_r)-quantile of the geometric waiting time::
-
-           theta_prob = ceil( log(epsilon_r) / log(1 - eta_prob) )
-
-    2. **Predictive-only and Event-triggered** — per-state thresholds,
-       because sojourn times are Geometric with state-dependent parameter.
-
-       AoI grows continuously (no reset on state transition for baselines).
-       Within a sojourn in state s the probability that AoI has NOT yet
-       reached theta_s after theta_s slots is q_ss^{theta_s} — matching
-       the complementary CDF of the geometric sojourn.  Setting this equal
-       to epsilon_r gives::
-
-           theta_s = ceil( log(epsilon_r) / log(q_ss) )
-
-       where q00 = 1 - q01 and q11 = 1 - q10.
+    AoII (burst of W_s packets at sojourn start, then silent):
+        P(AoI > theta | burst success) ≈ q_ss^(W_s + theta)
+        theta_s = ceil( log(epsilon_r) / log(q_ss) - W_s )
 
     Parameters
     ----------
-    q01       : Markov surrogate transition probability 0 → 1.
-    q10       : Markov surrogate transition probability 1 → 0.
-    eta_prob  : Effective per-slot detection rate for the probability
-                baseline: ``p_prob * (1 - eps_bar(p_t_prob))``.
-    epsilon_r : Reliability target (from the proposed method's design).
+    q01               : Markov surrogate transition probability 0 → 1.
+    q10               : Markov surrogate transition probability 1 → 0.
+    epsilon_r         : False-trigger probability target (from the proposed
+                        method's optimization result).
+    calibration_results : Output of calibrate_baselines; provides p_prob,
+                        p_t_prob (for probability) and W_0, W_1 (for AoII).
+    proposed_theta_0  : Proposed method's theta for state 0 (pass-through).
+    proposed_theta_1  : Proposed method's theta for state 1 (pass-through).
+    epsilon_bar_fn    : Callable(p_t) → average PER; used to compute the
+                        probability baseline's effective delivery rate.
 
     Returns
     -------
     dict::
 
         {
+          'proposed':    {'theta_0': int, 'theta_1': int},
           'predictive':  {'theta_0': int, 'theta_1': int},
           'event':       {'theta_0': int, 'theta_1': int},
           'probability': {'theta':   int},
+          'aoii':        {'theta_0': int, 'theta_1': int},
         }
     """
-    q01 = float(q01)
-    q10 = float(q10)
-    eta_prob = float(eta_prob)
+    q01       = float(q01)
+    q10       = float(q10)
     epsilon_r = float(epsilon_r)
 
     if not (0.0 < epsilon_r < 1.0):
         raise ValueError(f"epsilon_r must be in (0, 1), got {epsilon_r}.")
 
-    # ------------------------------------------------------------------
-    # Predictive-only / Event-triggered: geometric sojourn quantiles
-    # ------------------------------------------------------------------
-    q00 = 1.0 - q01
-    q11 = 1.0 - q10
+    q00     = 1.0 - q01
+    q11     = 1.0 - q10
+    log_eps = math.log(epsilon_r)
 
-    if q00 <= 0.0 or q00 >= 1.0:
-        theta_pred_0 = 1
-    else:
-        theta_pred_0 = int(math.ceil(math.log(epsilon_r) / math.log(q00)))
+    # Event-triggered and predictive-only: geometric sojourn quantiles
+    theta_pred_0 = int(math.ceil(log_eps / math.log(q00)))
+    theta_pred_1 = int(math.ceil(log_eps / math.log(q11)))
 
-    if q11 <= 0.0 or q11 >= 1.0:
-        theta_pred_1 = 1
-    else:
-        theta_pred_1 = int(math.ceil(math.log(epsilon_r) / math.log(q11)))
+    # Probability baseline: derive effective delivery rate from calibration
+    p_prob   = float(calibration_results["probability"]["p"])
+    p_t_prob = float(calibration_results["probability"]["p_t"])
+    eta      = p_prob * (1.0 - float(epsilon_bar_fn(p_t_prob)))
+    theta_prob = int(math.ceil(log_eps / math.log(1.0 - eta)))
 
-    # ------------------------------------------------------------------
-    # Probability baseline: single geometric quantile with rate eta_prob
-    # ------------------------------------------------------------------
-    eta_prob = float(np.clip(eta_prob, 1e-9, 1.0 - 1e-9))
-    theta_prob = int(math.ceil(math.log(epsilon_r) / math.log(1.0 - eta_prob)))
+    # AoII: burst of W_s slots reduces the residual wait
+    W_0 = int(calibration_results["aoii"]["W_0"])
+    W_1 = int(calibration_results["aoii"]["W_1"])
+    theta_aoii_0 = int(math.ceil(log_eps / math.log(q00) - W_0))
+    theta_aoii_1 = int(math.ceil(log_eps / math.log(q11) - W_1))
 
-    # Ensure all thresholds are at least 1
-    theta_pred_0 = max(1, theta_pred_0)
-    theta_pred_1 = max(1, theta_pred_1)
-    theta_prob   = max(1, theta_prob)
-
-    return {
-        "predictive":  {"theta_0": theta_pred_0, "theta_1": theta_pred_1},
-        "event":       {"theta_0": theta_pred_0, "theta_1": theta_pred_1},
+    result = {
+        "proposed":    {"theta_0": int(proposed_theta_0), "theta_1": int(proposed_theta_1)},
+        "predictive":  {"theta_0": theta_pred_0,          "theta_1": theta_pred_1},
+        "event":       {"theta_0": theta_pred_0,          "theta_1": theta_pred_1},
         "probability": {"theta":   theta_prob},
+        "aoii":        {"theta_0": theta_aoii_0,          "theta_1": theta_aoii_1},
     }
+
+    print(f"\n  === Per-method AoI detection thresholds (epsilon_r = {epsilon_r:.4f}) ===")
+    print(f"    Proposed:       theta_0={result['proposed']['theta_0']}, theta_1={result['proposed']['theta_1']}")
+    print(f"    Event-trigger:  theta_0={result['event']['theta_0']}, theta_1={result['event']['theta_1']}")
+    print(f"    Predictive:     theta_0={result['predictive']['theta_0']}, theta_1={result['predictive']['theta_1']}")
+    print(f"    Probability:    theta={result['probability']['theta']}")
+    print(f"    AoII:           theta_0={result['aoii']['theta_0']}, theta_1={result['aoii']['theta_1']}")
+
+    return result

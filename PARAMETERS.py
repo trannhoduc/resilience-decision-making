@@ -20,7 +20,7 @@ dt = 1.0                               # Sampling time
 # SIMULATION
 # =============================================================================
 
-T       = 1000                         # Total simulation steps
+T       = 100000                         # Total simulation steps
 Delta   = 5.0                          # Disruption magnitude
 # epsilon = 0.01                          # Perturbation parameter
 
@@ -30,8 +30,8 @@ MU_W = np.zeros((A.shape[0], 1))       # Process-noise mean (Assumption 1)
 # DETECTION THRESHOLDS
 # =============================================================================
 
-ALPHA_FN       = 0.1                   # False-negative rate (temporary)
-ALPHA_FP       = 0.1                 # False-positive rate (temporary)
+ALPHA_FN       = 0.15                   # False-negative rate (temporary)
+ALPHA_FP       = 0.15                 # False-positive rate (temporary)
 LOOKAHEAD_ELL  = 10                    # Lookahead horizon (temporary)
 
 # =============================================================================
@@ -64,8 +64,8 @@ P_T = 20
 # RECOVERY MODEL
 # =============================================================================
 
-P_R               = 0.001              # Recovery probability per step
-EPSILON_L         = 0.1             # Loss probability threshold
+P_R               = 0.02              # Recovery probability per step
+EPSILON_L         = 0.04             # Loss probability threshold
 TH_RECOVERY_LAMBDA = 4.0              # Recovery threshold lambda
 TH_RECOVERY_KAPPA  = 2.0              # Recovery threshold kappa
 

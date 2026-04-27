@@ -8,7 +8,7 @@ from baselines import calibrate_baselines, compute_baseline_thresholds
 
 
 if __name__ == "__main__":
-    np.random.seed(42)
+    np.random.seed(22)
 
     import PARAMETERS as P
 
@@ -124,25 +124,25 @@ if __name__ == "__main__":
         W0_aoii = 1
         W1_aoii = 1
         r_aoii = r_pred
+        calibration = {
+            "probability": {"p": p_prob_calibrated, "p_t": float(P_T)},
+            "aoii":        {"W_0": W0_aoii, "W_1": W1_aoii},
+        }
 
     # ------------------------------------------------------------------
     # Baseline AoI thresholds
     # ------------------------------------------------------------------
-    p_t_prob      = policy_p_t["probability"]
-    eps_bar_prob  = epsilon_bar_fn(p_t_prob)
-    eta_prob      = p_prob_calibrated * (1.0 - eps_bar_prob)
-
     baseline_thresholds = compute_baseline_thresholds(
         q01=q01,
         q10=q10,
-        eta_prob=eta_prob,
         epsilon_r=eps_r,
+        calibration_results=calibration,
+        proposed_theta_0=theta_0,
+        proposed_theta_1=theta_1,
+        epsilon_bar_fn=epsilon_bar_fn,
     )
-    print(f"\nBaseline AoI thresholds (eps_r = {eps_r:.4f}):")
     pred_th = baseline_thresholds["predictive"]
-    prob_th = baseline_thresholds["probability"]
-    print(f"  predictive / event : theta_0={pred_th['theta_0']}, theta_1={pred_th['theta_1']}")
-    print(f"  probability        : theta={prob_th['theta']}")
+    aoii_th = baseline_thresholds["aoii"]
 
     # ------------------------------------------------------------------
     # Pre-generate shared environment sequences (all policies see the same
@@ -214,14 +214,14 @@ if __name__ == "__main__":
         (
             "probability",
             "probability",
-            #dict(theta_0=prob_th["theta"], theta_1=prob_th["theta"]),
-            dict(theta_0=theta_0, theta_1=theta_1),
+            dict(theta_0=baseline_thresholds["probability"]["theta"],
+                 theta_1=baseline_thresholds["probability"]["theta"]),
             dict(p_prob=p_prob_calibrated),
         ),
         (
             "aoii",
             "aoii",
-            dict(theta_0=pred_th["theta_0"], theta_1=pred_th["theta_1"]),
+            dict(theta_0=aoii_th["theta_0"], theta_1=aoii_th["theta_1"]),
             dict(W_0=W0_aoii, W_1=W1_aoii),
         ),
     ]
