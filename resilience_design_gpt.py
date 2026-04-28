@@ -160,48 +160,6 @@ def compute_average_packet_error_closed_form(
         "eps_bar": eps_bar,
     }
 
-
-def compute_average_packet_error_monte_carlo(
-    pt: float,
-    noise_var: float,
-    n: int,
-    l: int,
-    num_samples: int = 50000,
-    seed: Optional[int] = None,
-    info_unit: str = "bits",
-) -> Dict[str, float]:
-    """
-    Optional Monte Carlo cross-check of average packet error rate by averaging
-    the instantaneous finite-blocklength approximation over Rayleigh fading.
-    """
-    pt = float(pt)
-    noise_var = float(noise_var)
-    n = int(n)
-    l = int(l)
-    num_samples = int(num_samples)
-
-    rng = np.random.default_rng(seed)
-    gbar = pt / noise_var
-    h2 = rng.exponential(scale=1.0, size=num_samples)
-    gamma = h2 * gbar
-    eps = np.array(
-        [compute_instantaneous_packet_error(g, n, l, info_unit=info_unit) for g in gamma],
-        dtype=float,
-    )
-
-    return {
-        "pt": pt,
-        "noise_var": noise_var,
-        "gbar": float(gbar),
-        "num_samples": num_samples,
-        "R_nats_per_channel_use": float(
-            _coding_rate_nats_per_channel_use(n=n, l=l, info_unit=info_unit)
-        ),
-        "info_unit": str(info_unit),
-        "eps_bar": float(np.mean(eps)),
-    }
-
-
 def compute_average_packet_error(
     pt: float,
     params: ParamsLike,

@@ -2,7 +2,7 @@ import math
 from PARAMETERS import *
 from model import *
 from computation import evaluate_decision, precompute_all
-from resilience_design_gpt import solve_resilience_design, compute_average_packet_error_closed_form
+from resillience_desgin_blackout import solve_resilience_design, compute_average_packet_error_closed_form
 from baselines import calibrate_baselines, compute_baseline_thresholds
 
 

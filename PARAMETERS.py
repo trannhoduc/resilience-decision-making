@@ -99,3 +99,15 @@ DEBUG_MAX_STEPS                = 100
 DEBUG_SEED                     = 42
 DEBUG_VERBOSE_STEPS            = 50
 DEBUG_OUT_PATH                 = "sensor_predictive_horizon_debug.png"
+
+# Finite-blocklength unit convention
+INFO_BITS_UNIT = "bits"   # use "nats" only if you want to reproduce the old printed formula directly
+
+# Outage expectation approximation
+OUTAGE_I_METHOD = "empirical"        # "mean" or "empirical"
+OUTAGE_D_METHOD = "distribution"     # "mean" or "distribution"
+OUTAGE_I_SAMPLE_CAP = 1000
+OUTAGE_I_SAMPLE_SEED = 123
+#OUTAGE_CONSTRAINT_METHOD = "upper_bound_simple"
+OUTAGE_CONSTRAINT_METHOD = "blackout_per_sojourn"
+
