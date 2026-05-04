@@ -162,6 +162,10 @@ class RemoteEstimator:
         self._recovery_end_k = None
         self._in_recovery = False
 
+        # Shared pre-generated recovery durations {onset_k: t_h}.
+        # Injected by the simulation loop from env_seq before the loop starts.
+        self._t_h_seq = None
+
         # TP/FP tracker (always present; populated for all modes)
         self.metrics_tracker = RecoveryMetricsTracker()
 
@@ -375,11 +379,20 @@ class RemoteEstimator:
 
         # ------------------------------------------------------------------
         # Recovery trigger: fire whenever AoI >= threshold.
+        # t_h is looked up from the shared pre-generated table so that every
+        # policy/paradigm uses the same recovery duration for the same physical
+        # disruption.  The nearest disruption onset at or before k is used,
+        # which handles late detection (another onset may have already happened).
+        # Falls back to sampling if no env_seq was provided.
         # ------------------------------------------------------------------
         theta_s = self.theta_0 if self._sojourn_state == 0 else self.theta_1
         if not self._in_recovery and self._aoi >= theta_s:
             self._in_recovery = True
-            t_h = self._sample_t_h()
+            if self._t_h_seq:
+                _prior = [ok for ok in self._t_h_seq if ok <= k]
+                t_h = self._t_h_seq[max(_prior)] if _prior else self._sample_t_h()
+            else:
+                t_h = self._sample_t_h()
             self._recovery_end_k = k + t_h
             self.metrics_tracker.log_recovery_trigger(bool(self._disruption_active))
 
@@ -523,6 +536,10 @@ class RemoteEstimatorDecisionOnly:
         self._recovery_end_k = None
         self._in_recovery = False
 
+        # Shared pre-generated recovery durations {onset_k: t_h}.
+        # Injected by the simulation loop from env_seq before the loop starts.
+        self._t_h_seq = None
+
         self.metrics_tracker = RecoveryMetricsTracker()
         self.delta_k = 0
 
@@ -665,12 +682,18 @@ class RemoteEstimatorDecisionOnly:
             self._aoi += 1
 
         # ------------------------------------------------------------------
-        # Recovery trigger
+        # Recovery trigger: fire whenever AoI >= threshold.
+        # Look up shared t_h from the nearest disruption onset at or before k.
+        # Falls back to sampling if no env_seq was provided.
         # ------------------------------------------------------------------
         theta_s = self.theta_0 if self._sojourn_state == 0 else self.theta_1
         if not self._in_recovery and self._aoi >= theta_s:
             self._in_recovery = True
-            t_h = self._sample_t_h()
+            if self._t_h_seq:
+                _prior = [ok for ok in self._t_h_seq if ok <= k]
+                t_h = self._t_h_seq[max(_prior)] if _prior else self._sample_t_h()
+            else:
+                t_h = self._sample_t_h()
             self._recovery_end_k = k + t_h
             self.metrics_tracker.log_recovery_trigger(bool(self._disruption_active))
 
@@ -1108,7 +1131,8 @@ def build_policy(policy_type, A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi,
     raise ValueError(f"Unknown policy_type '{policy_type}'. "
                      f"Choose 'predictive', 'resilient_predictive', 'probability', 'event_trigger', or 'aoii'.")
 
-def generate_env_sequences(T, n, m, Q, R, A, c, Delta, x_true0, p_r=0.0):
+def generate_env_sequences(T, n, m, Q, R, A, c, Delta, x_true0, p_r=0.0,
+                           weibull_lambda=4.0, weibull_kappa=2.0):
     """
     Pre-generate all environment randomness for T steps so that the same
     physical environment can be replayed identically across different policies.
@@ -1121,14 +1145,18 @@ def generate_env_sequences(T, n, m, Q, R, A, c, Delta, x_true0, p_r=0.0):
       3. Identify sojourns (contiguous runs in the same state).
       4. For each sojourn, draw Bernoulli(p_r): if hit, place the disruption
          onset at a step chosen uniformly at random within that sojourn.
+      5. For each disruption onset, pre-draw a recovery duration t_h from
+         Weibull(lambda, kappa) so that all methods/paradigms sharing this
+         env_seq use the same t_h for the same physical disruption.
 
-    Returns a dict with arrays of shape:
+    Returns a dict:
         "w"                 : (T, n)  — process noise w_k ~ N(0, Q)
         "v"                 : (T, m)  — measurement noise v_k ~ N(0, R)
         "disruption_onset"  : (T,)    — bool, True = new disruption starts this step
         "h2"                : (T,)    — Exp(1) channel gain
         "chan"               : (T,)    — U[0,1] for channel success Bernoulli
         "state_seq"         : (T,)    — int, true binary state (0/1) at each step
+        "t_h_seq"           : dict    — {onset_k: t_h} shared recovery durations
     """
     w = np.random.multivariate_normal(np.zeros(n), Q, size=T)          # (T, n)
     v = np.random.multivariate_normal(np.zeros(m), R, size=T)          # (T, m)
@@ -1157,8 +1185,16 @@ def generate_env_sequences(T, n, m, Q, R, A, c, Delta, x_true0, p_r=0.0):
             onset_k = np.random.randint(sojourn_start, sojourn_end)
             disruption_onset[onset_k] = True
 
+    # --- Step 5: pre-draw one shared t_h per disruption onset ---
+    t_h_seq = {}
+    for ki in range(T):
+        if disruption_onset[ki]:
+            u = np.random.rand()
+            val = weibull_lambda * ((-math.log(max(1.0 - u, 1e-15))) ** (1.0 / weibull_kappa)) - 1.0
+            t_h_seq[ki] = max(0, int(math.ceil(val)))
+
     return {"w": w, "v": v, "disruption_onset": disruption_onset,
-            "h2": h2, "chan": chan, "state_seq": state_seq}
+            "h2": h2, "chan": chan, "state_seq": state_seq, "t_h_seq": t_h_seq}
 
 
 def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_sym,
@@ -1178,6 +1214,11 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
     """
     p_t = float(getattr(transmission_policy, "p_t", p_t_default))
     energy_per_tx = blocklength_n * p_t * t_sym
+
+    # Inject shared recovery durations so every estimator uses the same t_h
+    # for the same physical disruption (ensures fair comparison).
+    if env_seq is not None:
+        estimator._t_h_seq = env_seq.get("t_h_seq", None)
 
     true_values = []
     est_values = []
@@ -1441,6 +1482,11 @@ def simulate_system_decision_only(sensor, estimator, T, transmission_policy,
     """
     p_t = float(getattr(transmission_policy, "p_t", p_t_default))
     energy_per_tx = blocklength_n * p_t * t_sym
+
+    # Inject shared recovery durations so every estimator uses the same t_h
+    # for the same physical disruption (ensures fair comparison).
+    if env_seq is not None:
+        estimator._t_h_seq = env_seq.get("t_h_seq", None)
 
     true_values = []
     true_events = []

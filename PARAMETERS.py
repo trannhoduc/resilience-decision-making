@@ -20,7 +20,7 @@ dt = 1.0                               # Sampling time
 # SIMULATION
 # =============================================================================
 
-T       = 1000                         # Total simulation steps
+T       = 50000                         # Total simulation steps
 Delta   = 5.0                          # Disruption magnitude
 # epsilon = 0.01                          # Perturbation parameter
 
@@ -64,7 +64,7 @@ P_T = 20
 # RECOVERY MODEL
 # =============================================================================
 
-P_R               = 0.02              # Recovery probability per step
+P_R               = 0.03              # Recovery probability per step
 EPSILON_L         = 0.05             # Loss probability threshold
 TH_RECOVERY_LAMBDA = 4.0              # Recovery threshold lambda
 TH_RECOVERY_KAPPA  = 2.0              # Recovery threshold kappa
