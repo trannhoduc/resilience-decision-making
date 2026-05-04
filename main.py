@@ -372,7 +372,7 @@ if __name__ == "__main__":
         # ---- filter_based plots ----
         plot_results(all_results["resilient_predictive"], Delta)
         # plot_results(all_results["probability"], Delta)
-        plot_horizon_histograms(all_results)
+        # plot_horizon_histograms(all_results)
 
         policy_names = [
             "resilient_predictive",

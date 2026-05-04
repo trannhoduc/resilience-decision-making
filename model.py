@@ -1187,6 +1187,7 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
     delta_hist = []
     energy_hist = []
     disruption_hist = []
+    predictive_tx_hist = []
 
     fp_idx = []
     fn_idx = []
@@ -1216,6 +1217,12 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
             P_remote=estimator.P,
             k=k
         ))
+
+        # Track whether this is a predictive transmission (future-transition announcement)
+        _pred_info = getattr(transmission_policy, "last_prediction", None) or {}
+        _pred_h = _pred_info.get("predicted_horizon")
+        _is_pred_tx = (transmit == 1 and _pred_h is not None and int(_pred_h) > 0)
+        predictive_tx_hist.append(int(_is_pred_tx))
 
         # Record disruption state BEFORE the step (reflects whether this step is blocked)
         disruption_hist.append(int(getattr(estimator, '_disruption_active', 0)))
@@ -1286,6 +1293,7 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
     delta_hist = np.array(delta_hist)
     energy_hist = np.array(energy_hist)
     disruption_hist = np.array(disruption_hist, dtype=int)
+    predictive_tx_hist = np.array(predictive_tx_hist, dtype=int)
     z_hist = np.array(z_hist)
 
     # Rates
@@ -1382,6 +1390,7 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
         "transmit_hist": transmit_hist,
         "delta_hist": delta_hist,
         "energy_hist": energy_hist,
+        "predictive_tx_hist": predictive_tx_hist,
         "fp_idx": np.array(fp_idx),
         "fn_idx": np.array(fn_idx),
         "fpr": false_positive_rate,
@@ -1440,6 +1449,7 @@ def simulate_system_decision_only(sensor, estimator, T, transmission_policy,
     delta_hist = []
     energy_hist = []
     disruption_hist = []
+    predictive_tx_hist = []
 
     fp_idx = []
     fn_idx = []
@@ -1494,6 +1504,8 @@ def simulate_system_decision_only(sensor, estimator, T, transmission_policy,
                 is_predictive = True
                 predicted_step = transmission_policy.predicted_transition_step
                 predicted_decision_val = transmission_policy.predicted_state
+
+        predictive_tx_hist.append(int(is_predictive))
 
         # ------------------------------------------------------------------
         # Disruption state before estimator step
@@ -1556,6 +1568,7 @@ def simulate_system_decision_only(sensor, estimator, T, transmission_policy,
     delta_hist     = np.array(delta_hist)
     energy_hist    = np.array(energy_hist)
     disruption_hist = np.array(disruption_hist, dtype=int)
+    predictive_tx_hist = np.array(predictive_tx_hist, dtype=int)
 
     # ------------------------------------------------------------------
     # Error rates
@@ -1645,6 +1658,7 @@ def simulate_system_decision_only(sensor, estimator, T, transmission_policy,
         "delta_hist":    delta_hist,
         "energy_hist":   energy_hist,
         "disruption_hist": disruption_hist,
+        "predictive_tx_hist": predictive_tx_hist,
         "fp_idx": np.array(fp_idx),
         "fn_idx": np.array(fn_idx),
         "fpr": false_positive_rate,
@@ -1812,6 +1826,190 @@ def plot_results(results, Delta):
 
     plt.tight_layout()
     plt.show()
+
+
+def plot_results_2(all_results, Delta, scenario_name=""):
+    """
+    Show all 5 methods at once — one figure window per method, same layout as
+    plot_results (signal plot top, update events bottom).
+
+    Extra markers beyond the orignal plot_results:
+      Gold star  : predictive update received (resilient_predictive / predictive —
+                   policy sent a future-transition announcement that arrived).
+      Gold x     : predictive packet transmitted but lost.
+      Purple ◆   : filter-based estimator-ahead update — a regular successful
+                   reception where the Kalman estimator is already in state 1
+                   while truth is still in state 0 (estimator predicts the
+                   transition by itself, without an explicit predictive packet).
+                   Only present when est_values comes from a real Kalman filter
+                   (filter_based paradigm); not shown in decision_adoption mode.
+
+    Call plt.show() after this function to display all 5 windows simultaneously.
+    """
+    import matplotlib.pyplot as plt
+
+    METHOD_COLORS = {
+        "resilient_predictive": "#1f77b4",
+        "predictive":           "#ff7f0e",
+        "event_trigger":        "#2ca02c",
+        "probability":          "#d62728",
+        "aoii":                 "#9467bd",
+    }
+
+    def _shade(ax1, ax2, disruption_hist):
+        in_d, d0, labeled = False, 0, False
+        for ki, d in enumerate(disruption_hist):
+            if d == 1 and not in_d:
+                in_d, d0 = True, ki
+            elif d == 0 and in_d:
+                in_d = False
+                lbl = "Disruption" if not labeled else ""
+                ax1.axvspan(d0, ki, color="purple", alpha=0.15, label=lbl)
+                ax2.axvspan(d0, ki, color="purple", alpha=0.15)
+                labeled = True
+        if in_d:
+            lbl = "Disruption" if not labeled else ""
+            ax1.axvspan(d0, len(disruption_hist), color="purple", alpha=0.15, label=lbl)
+            ax2.axvspan(d0, len(disruption_hist), color="purple", alpha=0.15)
+
+    def _fmt(v):
+        try:
+            f = float(v)
+            return "N/A" if math.isnan(f) else f"{f:.4f}"
+        except Exception:
+            return "N/A"
+
+    title_suffix = f"  [{scenario_name}]" if scenario_name else ""
+
+    for method_name, res in all_results.items():
+        T_len = len(res["true_values"])
+        t     = np.arange(T_len)
+
+        true_values     = np.asarray(res["true_values"])
+        true_events     = np.asarray(res["true_events"])
+        est_events      = np.asarray(res["est_events"])
+        transmit_hist   = np.asarray(res["transmit_hist"])
+        delta_hist      = np.asarray(res["delta_hist"])
+        fp_idx          = np.asarray(res["fp_idx"])
+        fn_idx          = np.asarray(res["fn_idx"])
+        disruption_hist = np.asarray(res.get("disruption_hist", np.zeros(T_len, dtype=int)))
+        pred_tx_hist    = np.asarray(res.get("predictive_tx_hist", np.zeros(T_len, dtype=int)))
+
+        # est_values: real Kalman output (filter_based) or synthesised from binary decisions
+        has_real_est = "est_values" in res
+        if has_real_est:
+            est_values = np.asarray(res["est_values"])
+        else:
+            step = float(np.std(true_values)) * 0.5 or 0.1
+            est_values = Delta + (est_events.astype(float) * 2 - 1) * step
+
+        # ── index sets ────────────────────────────────────────────────────
+        reg_rx_idx    = np.where((pred_tx_hist == 0) & (delta_hist == 1))[0]
+        pred_rx_idx   = np.where((pred_tx_hist == 1) & (delta_hist == 1))[0]
+        pred_fail_idx = np.where((pred_tx_hist == 1) & (delta_hist == 0))[0]
+        reg_fail_idx  = np.where((pred_tx_hist == 0) & (transmit_hist == 1) & (delta_hist == 0))[0]
+
+        # Filter-based estimator-ahead: a regular successful reception where the
+        # Kalman estimator is already in state 1 while truth is still in state 0.
+        # Only meaningful for probability and aoii policies (filter_based paradigm).
+        # event_trigger fires *after* the true transition, so it can never be
+        # "ahead"; resilient_predictive/predictive already have gold markers.
+        EST_AHEAD_POLICIES = {"probability", "aoii"}
+        if has_real_est and method_name in EST_AHEAD_POLICIES:
+            est_ahead_idx = np.where(
+                (pred_tx_hist == 0) & (delta_hist == 1) &
+                (est_events == 1) & (true_events == 0)
+            )[0]
+        else:
+            est_ahead_idx = np.array([], dtype=int)
+
+        color = METHOD_COLORS.get(method_name, "black")
+        fpr   = res.get("fpr", float("nan"))
+        fnr   = res.get("fnr", float("nan"))
+        avg_ph        = res.get("avg_predicted_horizon", float("nan"))
+        total_energy  = res.get("total_energy", float("nan"))
+        avg_energy    = res.get("avg_energy",   float("nan"))
+        n_pred_tx     = int(np.sum(pred_tx_hist))
+        total_dis     = int(np.sum(disruption_hist))
+
+        fig, (ax1, ax2) = plt.subplots(
+            2, 1, figsize=(14, 8), sharex=True,
+            gridspec_kw={"height_ratios": [5, 1]}
+        )
+        fig.suptitle(f"{method_name}{title_suffix}", fontsize=12, fontweight="bold")
+
+        _shade(ax1, ax2, disruption_hist)
+
+        # ── Top: signal plot ──────────────────────────────────────────────
+        ax1.plot(t, true_values, label=r"True $c^T x_k$", linewidth=2)
+        ax1.plot(t, est_values,  label=r"Estimator $c^T \hat{x}_k$", linewidth=2,
+                 linestyle="-" if has_real_est else "--")
+        ax1.axhline(Delta, linestyle="--", color="gray", linewidth=1.2,
+                    label=r"Threshold $\Delta$")
+
+        for i, k in enumerate(fp_idx):
+            ax1.axvline(x=k, color="red", linestyle=":", linewidth=1.5, alpha=0.9,
+                        label="False Positive" if i == 0 else "")
+        for i, k in enumerate(fn_idx):
+            ax1.axvline(x=k, color="green", linestyle="--", linewidth=1.5, alpha=0.9,
+                        label="False Negative" if i == 0 else "")
+        # Gold vertical line where a predictive packet was successfully received
+        for i, k in enumerate(pred_rx_idx):
+            ax1.axvline(x=k, color="gold", linewidth=2.0, alpha=0.8,
+                        label="Predictive update (rcvd)" if i == 0 else "")
+        # Purple vertical line for filter-based estimator-ahead updates
+        for i, k in enumerate(est_ahead_idx):
+            ax1.axvline(x=k, color="mediumpurple", linewidth=1.5, alpha=0.7,
+                        label="Est. ahead of truth" if i == 0 else "")
+
+        textstr = (
+            f"FPR = {fpr:.4f}   FNR = {fnr:.4f}\n"
+            f"E[L|L>0] = {_fmt(avg_ph)}\n"
+            f"Total Energy = {_fmt(total_energy)} J\n"
+            f"Avg Energy/Step = {_fmt(avg_energy)} J\n"
+            f"Predictive tx = {n_pred_tx}   Disruption steps = {total_dis}"
+        )
+        ax1.text(0.02, 0.98, textstr, transform=ax1.transAxes,
+                 verticalalignment="top", fontsize=8,
+                 bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
+        ax1.set_ylabel(r"Value of $c^T x$")
+        ax1.grid(True, alpha=0.4)
+        ax1.legend(loc="upper right", fontsize=8)
+
+        # ── Bottom: update events ─────────────────────────────────────────
+        ax2.axhline(0, color="black", linewidth=1)
+
+        if len(reg_rx_idx) > 0:
+            ax2.scatter(reg_rx_idx, np.zeros(len(reg_rx_idx)),
+                        marker="o", s=50, color="blue", zorder=3,
+                        label="Successful update")
+        if len(reg_fail_idx) > 0:
+            ax2.scatter(reg_fail_idx, np.zeros(len(reg_fail_idx)),
+                        marker="x", s=60, color="orange", zorder=3,
+                        label="Failed update")
+        if len(pred_rx_idx) > 0:
+            ax2.scatter(pred_rx_idx, np.zeros(len(pred_rx_idx)),
+                        marker="*", s=150, color="gold", zorder=5,
+                        label="Predictive update (rcvd)")
+        if len(pred_fail_idx) > 0:
+            ax2.scatter(pred_fail_idx, np.zeros(len(pred_fail_idx)),
+                        marker="x", s=90, color="goldenrod", zorder=4,
+                        label="Predictive update (lost)")
+        if len(est_ahead_idx) > 0:
+            ax2.scatter(est_ahead_idx, np.zeros(len(est_ahead_idx)),
+                        marker="D", s=60, color="mediumpurple", zorder=4,
+                        label="Est. ahead of truth")
+
+        ax2.set_ylim(-1, 1)
+        ax2.set_yticks([])
+        ax2.set_xlabel("Time step k")
+        ax2.set_ylabel("Updates")
+        ax2.grid(True, axis="x")
+        ax2.legend(loc="best", fontsize=8)
+
+        plt.tight_layout()
+
+    # Caller calls plt.show() after this to render all windows simultaneously.
 
 
 def plot_horizon_histograms(all_results, policy_names=None, x_cap=15):
