@@ -20,7 +20,7 @@ dt = 1.0                               # Sampling time
 # SIMULATION
 # =============================================================================
 
-T       = 10000                         # Total simulation steps
+T       = 200                         # Total simulation steps
 Delta   = 5.0                          # Disruption magnitude
 # epsilon = 0.01                          # Perturbation parameter
 
@@ -50,7 +50,7 @@ XI_WEIGHT_FN = 1.0                     # Penalty weight for false negatives
 
 BLOCKLENGTH_N      = 128               # Block length n
 INFO_BITS_L        = 256                # Information bits L
-CHANNEL_NOISE_VAR  = 1.0               # Channel noise variance
+CHANNEL_NOISE_VAR  = 0.1               # Channel noise variance
 
 PT_MIN = 0.05                          # Minimum transmission power
 PT_MAX = 200                            # Maximum transmission power
