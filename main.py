@@ -27,7 +27,7 @@ if __name__ == "__main__":
     #                   to flip its decision.
     #                   Reports: FPR, FNR, P(L>=0), P(L>0).
     # ================================================================
-    PARADIGM = "decision_adoption"      # paper Paradigm B
+    PARADIGM = "filter_based"      # paper Paradigm B
 
     import PARAMETERS as P
 
