@@ -1,49 +1,44 @@
 policy_id;policy;policy_display;from_state;transition_label;transition_tex;L_value;L_label;bar_type;color_id;count;n_total;n_miss;n_ontime;n_early;min_L;max_L
-0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;-1;miss;miss;0;3103;40623;3103;9367;28153;-1;4
-0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;0;0;ontime;1;9367;40623;3103;9367;28153;-1;4
-0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;1;1;early;2;18289;40623;3103;9367;28153;-1;4
-0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;2;2;early;2;9215;40623;3103;9367;28153;-1;4
-0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;3;3;early;2;643;40623;3103;9367;28153;-1;4
-0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;4;4;early;2;6;40623;3103;9367;28153;-1;4
-0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;-1;miss;miss;0;4052;40623;4052;3529;33042;-1;4
-0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;0;0;ontime;1;3529;40623;4052;3529;33042;-1;4
-0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;1;1;early;2;20881;40623;4052;3529;33042;-1;4
-0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;2;2;early;2;10877;40623;4052;3529;33042;-1;4
-0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;3;3;early;2;1245;40623;4052;3529;33042;-1;4
-0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;4;4;early;2;39;40623;4052;3529;33042;-1;4
-1;predictive;Predictive;0;0to1;$0\to1$;-1;miss;miss;0;6089;40623;6089;8666;25868;-1;4
-1;predictive;Predictive;0;0to1;$0\to1$;0;0;ontime;1;8666;40623;6089;8666;25868;-1;4
-1;predictive;Predictive;0;0to1;$0\to1$;1;1;early;2;16832;40623;6089;8666;25868;-1;4
-1;predictive;Predictive;0;0to1;$0\to1$;2;2;early;2;8456;40623;6089;8666;25868;-1;4
-1;predictive;Predictive;0;0to1;$0\to1$;3;3;early;2;574;40623;6089;8666;25868;-1;4
-1;predictive;Predictive;0;0to1;$0\to1$;4;4;early;2;6;40623;6089;8666;25868;-1;4
-1;predictive;Predictive;1;1to0;$1\to0$;-1;miss;miss;0;8816;40623;8816;3234;28573;-1;4
-1;predictive;Predictive;1;1to0;$1\to0$;0;0;ontime;1;3234;40623;8816;3234;28573;-1;4
-1;predictive;Predictive;1;1to0;$1\to0$;1;1;early;2;17994;40623;8816;3234;28573;-1;4
-1;predictive;Predictive;1;1to0;$1\to0$;2;2;early;2;9428;40623;8816;3234;28573;-1;4
-1;predictive;Predictive;1;1to0;$1\to0$;3;3;early;2;1114;40623;8816;3234;28573;-1;4
-1;predictive;Predictive;1;1to0;$1\to0$;4;4;early;2;37;40623;8816;3234;28573;-1;4
-2;event_trigger;Event trigger;0;0to1;$0\to1$;-1;miss;miss;0;6044;40623;6044;34579;0;-1;0
-2;event_trigger;Event trigger;0;0to1;$0\to1$;0;0;ontime;1;34579;40623;6044;34579;0;-1;0
-2;event_trigger;Event trigger;1;1to0;$1\to0$;-1;miss;miss;0;6401;40623;6401;34217;5;-1;1
-2;event_trigger;Event trigger;1;1to0;$1\to0$;0;0;ontime;1;34217;40623;6401;34217;5;-1;1
-2;event_trigger;Event trigger;1;1to0;$1\to0$;1;1;early;2;5;40623;6401;34217;5;-1;1
-3;probability;Probability;0;0to1;$0\to1$;-1;miss;miss;0;1622;40623;1622;11038;27963;-1;4
-3;probability;Probability;0;0to1;$0\to1$;0;0;ontime;1;11038;40623;1622;11038;27963;-1;4
-3;probability;Probability;0;0to1;$0\to1$;1;1;early;2;18443;40623;1622;11038;27963;-1;4
-3;probability;Probability;0;0to1;$0\to1$;2;2;early;2;8896;40623;1622;11038;27963;-1;4
-3;probability;Probability;0;0to1;$0\to1$;3;3;early;2;620;40623;1622;11038;27963;-1;4
-3;probability;Probability;0;0to1;$0\to1$;4;4;early;2;4;40623;1622;11038;27963;-1;4
-3;probability;Probability;1;1to0;$1\to0$;-1;miss;miss;0;1415;40623;1415;6200;33008;-1;4
-3;probability;Probability;1;1to0;$1\to0$;0;0;ontime;1;6200;40623;1415;6200;33008;-1;4
-3;probability;Probability;1;1to0;$1\to0$;1;1;early;2;21208;40623;1415;6200;33008;-1;4
-3;probability;Probability;1;1to0;$1\to0$;2;2;early;2;10577;40623;1415;6200;33008;-1;4
-3;probability;Probability;1;1to0;$1\to0$;3;3;early;2;1184;40623;1415;6200;33008;-1;4
-3;probability;Probability;1;1to0;$1\to0$;4;4;early;2;39;40623;1415;6200;33008;-1;4
-4;aoii;AoII;0;0to1;$0\to1$;-1;miss;miss;0;5127;40623;5127;35411;85;-1;1
-4;aoii;AoII;0;0to1;$0\to1$;0;0;ontime;1;35411;40623;5127;35411;85;-1;1
-4;aoii;AoII;0;0to1;$0\to1$;1;1;early;2;85;40623;5127;35411;85;-1;1
-4;aoii;AoII;1;1to0;$1\to0$;-1;miss;miss;0;5421;40623;5421;33468;1734;-1;2
-4;aoii;AoII;1;1to0;$1\to0$;0;0;ontime;1;33468;40623;5421;33468;1734;-1;2
-4;aoii;AoII;1;1to0;$1\to0$;1;1;early;2;1653;40623;5421;33468;1734;-1;2
-4;aoii;AoII;1;1to0;$1\to0$;2;2;early;2;81;40623;5421;33468;1734;-1;2
+0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;-1;miss;miss;0;34;393;34;98;261;-1;3
+0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;0;0;ontime;1;98;393;34;98;261;-1;3
+0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;1;1;early;2;179;393;34;98;261;-1;3
+0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;2;2;early;2;76;393;34;98;261;-1;3
+0;resilient_predictive;Resilient predictive;0;0to1;$0\to1$;3;3;early;2;6;393;34;98;261;-1;3
+0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;-1;miss;miss;0;47;393;47;35;311;-1;4
+0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;0;0;ontime;1;35;393;47;35;311;-1;4
+0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;1;1;early;2;209;393;47;35;311;-1;4
+0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;2;2;early;2;91;393;47;35;311;-1;4
+0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;3;3;early;2;10;393;47;35;311;-1;4
+0;resilient_predictive;Resilient predictive;1;1to0;$1\to0$;4;4;early;2;1;393;47;35;311;-1;4
+1;predictive;Predictive;0;0to1;$0\to1$;-1;miss;miss;0;61;393;61;89;243;-1;3
+1;predictive;Predictive;0;0to1;$0\to1$;0;0;ontime;1;89;393;61;89;243;-1;3
+1;predictive;Predictive;0;0to1;$0\to1$;1;1;early;2;171;393;61;89;243;-1;3
+1;predictive;Predictive;0;0to1;$0\to1$;2;2;early;2;66;393;61;89;243;-1;3
+1;predictive;Predictive;0;0to1;$0\to1$;3;3;early;2;6;393;61;89;243;-1;3
+1;predictive;Predictive;1;1to0;$1\to0$;-1;miss;miss;0;94;393;94;31;268;-1;4
+1;predictive;Predictive;1;1to0;$1\to0$;0;0;ontime;1;31;393;94;31;268;-1;4
+1;predictive;Predictive;1;1to0;$1\to0$;1;1;early;2;176;393;94;31;268;-1;4
+1;predictive;Predictive;1;1to0;$1\to0$;2;2;early;2;81;393;94;31;268;-1;4
+1;predictive;Predictive;1;1to0;$1\to0$;3;3;early;2;10;393;94;31;268;-1;4
+1;predictive;Predictive;1;1to0;$1\to0$;4;4;early;2;1;393;94;31;268;-1;4
+2;event_trigger;Event trigger;0;0to1;$0\to1$;-1;miss;miss;0;62;393;62;331;0;-1;0
+2;event_trigger;Event trigger;0;0to1;$0\to1$;0;0;ontime;1;331;393;62;331;0;-1;0
+2;event_trigger;Event trigger;1;1to0;$1\to0$;-1;miss;miss;0;61;393;61;332;0;-1;0
+2;event_trigger;Event trigger;1;1to0;$1\to0$;0;0;ontime;1;332;393;61;332;0;-1;0
+3;probability;Probability;0;0to1;$0\to1$;-1;miss;miss;0;24;393;24;115;254;-1;3
+3;probability;Probability;0;0to1;$0\to1$;0;0;ontime;1;115;393;24;115;254;-1;3
+3;probability;Probability;0;0to1;$0\to1$;1;1;early;2;174;393;24;115;254;-1;3
+3;probability;Probability;0;0to1;$0\to1$;2;2;early;2;75;393;24;115;254;-1;3
+3;probability;Probability;0;0to1;$0\to1$;3;3;early;2;5;393;24;115;254;-1;3
+3;probability;Probability;1;1to0;$1\to0$;-1;miss;miss;0;14;393;14;62;317;-1;4
+3;probability;Probability;1;1to0;$1\to0$;0;0;ontime;1;62;393;14;62;317;-1;4
+3;probability;Probability;1;1to0;$1\to0$;1;1;early;2;212;393;14;62;317;-1;4
+3;probability;Probability;1;1to0;$1\to0$;2;2;early;2;94;393;14;62;317;-1;4
+3;probability;Probability;1;1to0;$1\to0$;3;3;early;2;10;393;14;62;317;-1;4
+3;probability;Probability;1;1to0;$1\to0$;4;4;early;2;1;393;14;62;317;-1;4
+4;aoii;AoII;0;0to1;$0\to1$;-1;miss;miss;0;57;393;57;336;0;-1;0
+4;aoii;AoII;0;0to1;$0\to1$;0;0;ontime;1;336;393;57;336;0;-1;0
+4;aoii;AoII;1;1to0;$1\to0$;-1;miss;miss;0;52;393;52;322;19;-1;2
+4;aoii;AoII;1;1to0;$1\to0$;0;0;ontime;1;322;393;52;322;19;-1;2
+4;aoii;AoII;1;1to0;$1\to0$;1;1;early;2;18;393;52;322;19;-1;2
+4;aoii;AoII;1;1to0;$1\to0$;2;2;early;2;1;393;52;322;19;-1;2

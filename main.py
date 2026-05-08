@@ -268,6 +268,8 @@ if __name__ == "__main__":
 
         estimator.init_value(x_hat0, P0)
         estimator.last_decision = initial_decision
+        if policy_type == "resilient_predictive":
+            estimator.reset_aoi_on_transition = True
 
         policy = build_policy(
             policy_type=policy_type,

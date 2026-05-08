@@ -166,6 +166,10 @@ class RemoteEstimator:
         # Injected by the simulation loop from env_seq before the loop starts.
         self._t_h_seq = None
 
+        # When True (resilient_predictive policy), AoI also resets on every
+        # estimator-detected sojourn transition, not only on packet reception.
+        self.reset_aoi_on_transition = False
+
         # TP/FP tracker (always present; populated for all modes)
         self.metrics_tracker = RecoveryMetricsTracker()
 
@@ -405,6 +409,7 @@ class RemoteEstimator:
             self._in_recovery = False
             self._recovery_end_k = None
             self._disruption_active = False
+            self._aoi = 0
 
         # ------------------------------------------------------------------
         # Decision
@@ -456,6 +461,8 @@ class RemoteEstimator:
         self.last_decision = decision
         if decision != prev_decision:
             self._init_sojourn()
+            if self.reset_aoi_on_transition:
+                self._aoi = 0
 
         return self.x_hat, self.P, delta_k, decision, decision_info
 
@@ -539,6 +546,10 @@ class RemoteEstimatorDecisionOnly:
         # Shared pre-generated recovery durations {onset_k: t_h}.
         # Injected by the simulation loop from env_seq before the loop starts.
         self._t_h_seq = None
+
+        # When True (resilient_predictive policy), AoI also resets on every
+        # estimator-detected sojourn transition, not only on packet reception.
+        self.reset_aoi_on_transition = False
 
         self.metrics_tracker = RecoveryMetricsTracker()
         self.delta_k = 0
@@ -706,6 +717,7 @@ class RemoteEstimatorDecisionOnly:
             self._in_recovery = False
             self._recovery_end_k = None
             self._disruption_active = False
+            self._aoi = 0
 
         # ------------------------------------------------------------------
         # Sojourn transition detection
@@ -713,6 +725,8 @@ class RemoteEstimatorDecisionOnly:
         decision = self.last_decision
         if decision != prev_decision:
             self._init_sojourn()
+            if self.reset_aoi_on_transition:
+                self._aoi = 0
 
         return delta_k, decision
 

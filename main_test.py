@@ -168,6 +168,8 @@ def build_all_results(paradigm: str, seed: int) -> dict:
             estimator = RemoteEstimatorDecisionOnly(**_est_base, **est_kwargs)
         estimator.init_value(x_hat0, P0)
         estimator.last_decision = initial_decision
+        if policy_type == "resilient_predictive":
+            estimator.reset_aoi_on_transition = True
 
         policy = build_policy(
             policy_type=policy_type, A=A, Q=Q, c=c, Delta=Delta,
