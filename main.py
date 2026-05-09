@@ -7,7 +7,7 @@ from baselines import calibrate_baselines, compute_baseline_thresholds
 
 
 if __name__ == "__main__":
-    np.random.seed(22)
+    np.random.seed(23)
 
     import PARAMETERS as P
 
