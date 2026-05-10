@@ -162,6 +162,14 @@ class RemoteEstimator:
         self._recovery_end_k = None
         self._in_recovery = False
 
+        # Shared pre-generated recovery durations {onset_k: t_h}.
+        # Injected by the simulation loop from env_seq before the loop starts.
+        self._t_h_seq = None
+
+        # When True (resilient_predictive policy), AoI also resets on every
+        # estimator-detected sojourn transition, not only on packet reception.
+        self.reset_aoi_on_transition = False
+
         # TP/FP tracker (always present; populated for all modes)
         self.metrics_tracker = RecoveryMetricsTracker()
 
@@ -375,11 +383,20 @@ class RemoteEstimator:
 
         # ------------------------------------------------------------------
         # Recovery trigger: fire whenever AoI >= threshold.
+        # t_h is looked up from the shared pre-generated table so that every
+        # policy/paradigm uses the same recovery duration for the same physical
+        # disruption.  The nearest disruption onset at or before k is used,
+        # which handles late detection (another onset may have already happened).
+        # Falls back to sampling if no env_seq was provided.
         # ------------------------------------------------------------------
         theta_s = self.theta_0 if self._sojourn_state == 0 else self.theta_1
         if not self._in_recovery and self._aoi >= theta_s:
             self._in_recovery = True
-            t_h = self._sample_t_h()
+            if self._t_h_seq:
+                _prior = [ok for ok in self._t_h_seq if ok <= k]
+                t_h = self._t_h_seq[max(_prior)] if _prior else self._sample_t_h()
+            else:
+                t_h = self._sample_t_h()
             self._recovery_end_k = k + t_h
             self.metrics_tracker.log_recovery_trigger(bool(self._disruption_active))
 
@@ -392,6 +409,7 @@ class RemoteEstimator:
             self._in_recovery = False
             self._recovery_end_k = None
             self._disruption_active = False
+            self._aoi = 0
 
         # ------------------------------------------------------------------
         # Decision
@@ -443,8 +461,275 @@ class RemoteEstimator:
         self.last_decision = decision
         if decision != prev_decision:
             self._init_sojourn()
+            if self.reset_aoi_on_transition:
+                self._aoi = 0
 
         return self.x_hat, self.P, delta_k, decision, decision_info
+
+
+# ===========================================================================
+# Scenario 2 remote estimator — decision-only
+# ===========================================================================
+class RemoteEstimatorDecisionOnly:
+    """
+    Scenario 2 remote estimator.
+
+    The estimator only receives the binary decision sent by the sensor.
+    It maintains NO Kalman filter state.
+
+    Update rules
+    ------------
+    Non-predictive packet (delta_k=1, not predictive):
+        last_decision = received_decision   (immediately adopted)
+        Any pending predictive schedule is cancelled.
+    Predictive packet (delta_k=1, is_predictive=True):
+        Schedule last_decision = predicted_decision at step predicted_step.
+        Decision does NOT change until that scheduled step.
+    No packet (delta_k=0):
+        last_decision unchanged; any pending schedule is kept.
+    At k == scheduled_step (from a prior predictive packet):
+        last_decision = scheduled_decision   (regardless of reception this step).
+
+    Disruption, AoI, and recovery logic are identical to RemoteEstimator.
+    The constructor signature is identical so main.py can switch between the
+    two estimator classes with a single flag.
+    """
+
+    def __init__(self, A, Q, c, Delta, noise_var, blocklength_n, info_bits_l,
+                 alpha_fp, alpha_fn, xi, ell,
+                 q01=0.0, q10=0.0, p_r=0.0, theta_0=5, theta_1=5,
+                 weibull_lambda=4.0, weibull_kappa=2.0):
+        self.A = A
+        self.Q = Q
+        self.c = np.asarray(c, dtype=float).reshape(-1, 1)
+        self.Delta = float(Delta)
+        self.noise_var = float(noise_var)
+        self.blocklength_n = int(blocklength_n)
+        self.info_bits_l = int(info_bits_l)
+
+        self.alpha_fp = float(alpha_fp)
+        self.alpha_fn = float(alpha_fn)
+        self.xi = float(xi)
+        self.ell = int(ell)
+
+        self.q01 = float(q01)
+        self.q10 = float(q10)
+        self.p_r = float(p_r)
+        self.theta_0 = int(theta_0)
+        self.theta_1 = int(theta_1)
+        self.weibull_lambda = float(weibull_lambda)
+        self.weibull_kappa = float(weibull_kappa)
+
+        self.n = A.shape[0]
+
+        # Binary decision state
+        self.last_decision = 0
+
+        # Predictive schedule (from received predictive packets)
+        self._scheduled_decision = None
+        self._scheduled_step = None
+
+        # Horizon tracking (mirrors RemoteEstimator)
+        self._horizon_detected = False
+        self._current_horizon = None
+        self._horizon_history = []
+        self._horizon_state_history = []
+        self._sojourn_initialized = False
+
+        # Disruption / AoI / recovery runtime state
+        self._sojourn_state = 0
+        self._aoi = 0
+        self._disruption_active = False
+        self._recovery_end_k = None
+        self._in_recovery = False
+
+        # Shared pre-generated recovery durations {onset_k: t_h}.
+        # Injected by the simulation loop from env_seq before the loop starts.
+        self._t_h_seq = None
+
+        # When True (resilient_predictive policy), AoI also resets on every
+        # estimator-detected sojourn transition, not only on packet reception.
+        self.reset_aoi_on_transition = False
+
+        self.metrics_tracker = RecoveryMetricsTracker()
+        self.delta_k = 0
+
+    def init_value(self, x_hat0, P0):
+        """Accept x_hat0/P0 for interface compatibility; they are not used."""
+        self.last_decision = 0  # overridden by caller: estimator.last_decision = initial_decision
+
+        self._scheduled_decision = None
+        self._scheduled_step = None
+        self._horizon_detected = False
+        self._current_horizon = None
+        self._horizon_history = []
+        self._horizon_state_history = []
+        self._sojourn_initialized = False
+
+        self._init_sojourn()
+        self._sojourn_initialized = True
+
+    def _init_sojourn(self):
+        self._sojourn_state = int(self.last_decision)
+
+    def record_sensor_transition(self, from_state, delta_k):
+        """Identical to RemoteEstimator.record_sensor_transition."""
+        if self._horizon_detected:
+            h = self._current_horizon
+        elif delta_k == 1:
+            h = 0
+        else:
+            h = -1
+        self._horizon_history.append(h)
+        self._horizon_state_history.append(int(from_state))
+        self._horizon_detected = False
+        self._current_horizon = None
+
+    def _sample_t_h(self):
+        u = np.random.rand()
+        val = self.weibull_lambda * (
+            (-math.log(max(1.0 - u, 1e-15))) ** (1.0 / self.weibull_kappa)
+        ) - 1.0
+        return max(0, int(math.ceil(val)))
+
+    def packet_success(self, transmit, p_t, h2=None, chan_u=None):
+        """Identical to RemoteEstimator.packet_success."""
+        if transmit == 0:
+            return 0
+        if self._disruption_active:
+            return 0
+        h2 = np.random.exponential(scale=1.0) if h2 is None else float(h2)
+        chan_u = np.random.rand() if chan_u is None else float(chan_u)
+        gbar = p_t / self.noise_var
+        gamma = h2 * gbar
+        eps_k = compute_instantaneous_packet_error(gamma, self.blocklength_n, self.info_bits_l)
+        return 1 if chan_u > eps_k else 0
+
+    def step(self, transmitted_decision, transmit, k, p_t=1.0,
+             disruption_onset_k=None, h2=None, chan_u=None,
+             is_predictive=False, predicted_step=None, predicted_decision=None):
+        """
+        One estimator step for the decision-only scenario.
+
+        Parameters
+        ----------
+        transmitted_decision : int (0 or 1)
+            The sensor's current binary decision (sent in non-predictive packets).
+        transmit : int (0 or 1)
+            Whether the sensor transmitted this slot.
+        k : int
+            Current time index.
+        p_t : float
+            Transmit power.
+        disruption_onset_k : bool or None
+            Pre-generated disruption onset flag for this slot.
+        h2 : float or None
+            Pre-generated Exp(1) channel gain.
+        chan_u : float or None
+            Pre-generated U[0,1] for channel success Bernoulli.
+        is_predictive : bool
+            True if the transmitted packet is a predictive update (carries a
+            future decision and its scheduled step).
+        predicted_step : int or None
+            Absolute step at which the predicted transition occurs.
+        predicted_decision : int or None
+            Decision value after the predicted transition.
+        """
+        prev_decision = self.last_decision
+
+        # ------------------------------------------------------------------
+        # Disruption onset
+        # ------------------------------------------------------------------
+        if disruption_onset_k and not self._disruption_active:
+            self._disruption_active = True
+
+        # ------------------------------------------------------------------
+        # Reception
+        # ------------------------------------------------------------------
+        delta_k = self.packet_success(transmit, p_t, h2=h2, chan_u=chan_u)
+        self.delta_k = delta_k
+
+        # ------------------------------------------------------------------
+        # Process received packet
+        # ------------------------------------------------------------------
+        if delta_k == 1:
+            if is_predictive:
+                # Predictive packet: record horizon, schedule future decision.
+                # Override any existing schedule with the fresher prediction.
+                self._horizon_detected = True
+                self._current_horizon = predicted_step - k
+                self._scheduled_decision = int(predicted_decision)
+                self._scheduled_step = predicted_step
+            else:
+                # Current-decision packet: adopt immediately and cancel any
+                # pending predictive schedule (prediction was superseded).
+                # self.last_decision = int(transmitted_decision)
+                # self._scheduled_step = None
+                # self._scheduled_decision = None
+
+                self.last_decision = int(transmitted_decision)
+
+                if self._scheduled_step is not None:
+                    self._horizon_detected = False
+                    self._current_horizon = None
+
+                self._scheduled_step = None
+                self._scheduled_decision = None
+
+        # ------------------------------------------------------------------
+        # Apply scheduled decision (fires at the predicted transition step)
+        # ------------------------------------------------------------------
+        if self._scheduled_step is not None and k == self._scheduled_step:
+            self.last_decision = self._scheduled_decision
+            self._scheduled_step = None
+            self._scheduled_decision = None
+
+        # ------------------------------------------------------------------
+        # AoI update (tracks time since last received packet, delta_k-driven)
+        # ------------------------------------------------------------------
+        if delta_k == 1:
+            self._aoi = 0
+        else:
+            self._aoi += 1
+
+        # ------------------------------------------------------------------
+        # Recovery trigger: fire whenever AoI >= threshold.
+        # Look up shared t_h from the nearest disruption onset at or before k.
+        # Falls back to sampling if no env_seq was provided.
+        # ------------------------------------------------------------------
+        theta_s = self.theta_0 if self._sojourn_state == 0 else self.theta_1
+        if not self._in_recovery and self._aoi >= theta_s:
+            self._in_recovery = True
+            if self._t_h_seq:
+                _prior = [ok for ok in self._t_h_seq if ok <= k]
+                t_h = self._t_h_seq[max(_prior)] if _prior else self._sample_t_h()
+            else:
+                t_h = self._sample_t_h()
+            self._recovery_end_k = k + t_h
+            self.metrics_tracker.log_recovery_trigger(bool(self._disruption_active))
+
+        # ------------------------------------------------------------------
+        # Recovery completion
+        # ------------------------------------------------------------------
+        if (self._in_recovery
+                and self._recovery_end_k is not None
+                and k >= self._recovery_end_k):
+            self._in_recovery = False
+            self._recovery_end_k = None
+            self._disruption_active = False
+            self._aoi = 0
+
+        # ------------------------------------------------------------------
+        # Sojourn transition detection
+        # ------------------------------------------------------------------
+        decision = self.last_decision
+        if decision != prev_decision:
+            self._init_sojourn()
+            if self.reset_aoi_on_transition:
+                self._aoi = 0
+
+        return delta_k, decision
+
 
 class PredictivePolicy:
     """
@@ -707,15 +992,23 @@ class ResilientPredictivePolicy(PredictivePolicy):
         # ------------------------------------------------------------------
         # Case 1: pending packet active, no transition yet -> silent
         # ------------------------------------------------------------------
+        # if had_pending and k < self.predicted_transition_step:
+        #     self.last_prediction = {
+        #         "found_transition": False,
+        #         "reason": "pending_predictive_packet_active_same_state",
+        #         "predicted_transition_time": None,
+        #     }
+        #     p_u = self.p_u0 if self.last_local_decision == 1 else self.p_u1
+        #     if np.random.rand() < p_u:
+        #         return 1
+        #     return 0
         if had_pending and k < self.predicted_transition_step:
             self.last_prediction = {
                 "found_transition": False,
-                "reason": "pending_predictive_packet_active_same_state",
+                "reason": "pending_predictive_packet_active",
                 "predicted_transition_time": None,
+                "predicted_horizon": None,
             }
-            p_u = self.p_u0 if self.last_local_decision == 1 else self.p_u1
-            if np.random.rand() < p_u:
-                return 1
             return 0
 
         # ------------------------------------------------------------------
@@ -852,7 +1145,8 @@ def build_policy(policy_type, A, Q, c, Delta, alpha_fp, alpha_fn, ell, xi,
     raise ValueError(f"Unknown policy_type '{policy_type}'. "
                      f"Choose 'predictive', 'resilient_predictive', 'probability', 'event_trigger', or 'aoii'.")
 
-def generate_env_sequences(T, n, m, Q, R, A, c, Delta, x_true0, p_r=0.0):
+def generate_env_sequences(T, n, m, Q, R, A, c, Delta, x_true0, p_r=0.0,
+                           weibull_lambda=4.0, weibull_kappa=2.0):
     """
     Pre-generate all environment randomness for T steps so that the same
     physical environment can be replayed identically across different policies.
@@ -865,14 +1159,18 @@ def generate_env_sequences(T, n, m, Q, R, A, c, Delta, x_true0, p_r=0.0):
       3. Identify sojourns (contiguous runs in the same state).
       4. For each sojourn, draw Bernoulli(p_r): if hit, place the disruption
          onset at a step chosen uniformly at random within that sojourn.
+      5. For each disruption onset, pre-draw a recovery duration t_h from
+         Weibull(lambda, kappa) so that all methods/paradigms sharing this
+         env_seq use the same t_h for the same physical disruption.
 
-    Returns a dict with arrays of shape:
+    Returns a dict:
         "w"                 : (T, n)  — process noise w_k ~ N(0, Q)
         "v"                 : (T, m)  — measurement noise v_k ~ N(0, R)
         "disruption_onset"  : (T,)    — bool, True = new disruption starts this step
         "h2"                : (T,)    — Exp(1) channel gain
         "chan"               : (T,)    — U[0,1] for channel success Bernoulli
         "state_seq"         : (T,)    — int, true binary state (0/1) at each step
+        "t_h_seq"           : dict    — {onset_k: t_h} shared recovery durations
     """
     w = np.random.multivariate_normal(np.zeros(n), Q, size=T)          # (T, n)
     v = np.random.multivariate_normal(np.zeros(m), R, size=T)          # (T, m)
@@ -901,8 +1199,16 @@ def generate_env_sequences(T, n, m, Q, R, A, c, Delta, x_true0, p_r=0.0):
             onset_k = np.random.randint(sojourn_start, sojourn_end)
             disruption_onset[onset_k] = True
 
+    # --- Step 5: pre-draw one shared t_h per disruption onset ---
+    t_h_seq = {}
+    for ki in range(T):
+        if disruption_onset[ki]:
+            u = np.random.rand()
+            val = weibull_lambda * ((-math.log(max(1.0 - u, 1e-15))) ** (1.0 / weibull_kappa)) - 1.0
+            t_h_seq[ki] = max(0, int(math.ceil(val)))
+
     return {"w": w, "v": v, "disruption_onset": disruption_onset,
-            "h2": h2, "chan": chan, "state_seq": state_seq}
+            "h2": h2, "chan": chan, "state_seq": state_seq, "t_h_seq": t_h_seq}
 
 
 def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_sym,
@@ -923,6 +1229,11 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
     p_t = float(getattr(transmission_policy, "p_t", p_t_default))
     energy_per_tx = blocklength_n * p_t * t_sym
 
+    # Inject shared recovery durations so every estimator uses the same t_h
+    # for the same physical disruption (ensures fair comparison).
+    if env_seq is not None:
+        estimator._t_h_seq = env_seq.get("t_h_seq", None)
+
     true_values = []
     est_values = []
     true_events = []
@@ -931,6 +1242,7 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
     delta_hist = []
     energy_hist = []
     disruption_hist = []
+    predictive_tx_hist = []
 
     fp_idx = []
     fn_idx = []
@@ -960,6 +1272,12 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
             P_remote=estimator.P,
             k=k
         ))
+
+        # Track whether this is a predictive transmission (future-transition announcement)
+        _pred_info = getattr(transmission_policy, "last_prediction", None) or {}
+        _pred_h = _pred_info.get("predicted_horizon")
+        _is_pred_tx = (transmit == 1 and _pred_h is not None and int(_pred_h) > 0)
+        predictive_tx_hist.append(int(_is_pred_tx))
 
         # Record disruption state BEFORE the step (reflects whether this step is blocked)
         disruption_hist.append(int(getattr(estimator, '_disruption_active', 0)))
@@ -1030,6 +1348,7 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
     delta_hist = np.array(delta_hist)
     energy_hist = np.array(energy_hist)
     disruption_hist = np.array(disruption_hist, dtype=int)
+    predictive_tx_hist = np.array(predictive_tx_hist, dtype=int)
     z_hist = np.array(z_hist)
 
     # Rates
@@ -1126,6 +1445,7 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
         "transmit_hist": transmit_hist,
         "delta_hist": delta_hist,
         "energy_hist": energy_hist,
+        "predictive_tx_hist": predictive_tx_hist,
         "fp_idx": np.array(fp_idx),
         "fn_idx": np.array(fn_idx),
         "fpr": false_positive_rate,
@@ -1151,6 +1471,278 @@ def simulate_system(sensor, estimator, T, transmission_policy, blocklength_n, t_
     }
 
     return results
+
+
+# ===========================================================================
+# Scenario 2 simulation loop — decision-only
+# ===========================================================================
+def simulate_system_decision_only(sensor, estimator, T, transmission_policy,
+                                   blocklength_n, t_sym, p_t_default=20.0, env_seq=None):
+    """
+    Scenario 2 simulation.
+
+    The sensor transmits only its binary decision (plus a predicted future
+    transition step/decision for predictive policies). The estimator
+    (RemoteEstimatorDecisionOnly) maintains no Kalman filter state.
+
+    Packet content is derived from the policy's last_prediction after each
+    policy call:
+      - Non-predictive packet: carries sensor's current binary decision.
+      - Predictive packet    : carries (predicted_decision, predicted_step);
+                              estimator schedules the decision change and
+                              does NOT adopt it until that step arrives.
+
+    Returns a dict with the same keys as simulate_system where applicable.
+    """
+    p_t = float(getattr(transmission_policy, "p_t", p_t_default))
+    energy_per_tx = blocklength_n * p_t * t_sym
+
+    # Inject shared recovery durations so every estimator uses the same t_h
+    # for the same physical disruption (ensures fair comparison).
+    if env_seq is not None:
+        estimator._t_h_seq = env_seq.get("t_h_seq", None)
+
+    true_values = []
+    true_events = []
+    est_events = []
+    transmit_hist = []
+    delta_hist = []
+    energy_hist = []
+    disruption_hist = []
+    predictive_tx_hist = []
+
+    fp_idx = []
+    fn_idx = []
+
+    # Canonical sensor-side decision tracker (policy-independent)
+    sensor_prev_decision = estimator.last_decision
+
+    for k in range(T):
+        # ------------------------------------------------------------------
+        # Sensor step
+        # ------------------------------------------------------------------
+        if env_seq is not None:
+            x_true, y_k, x_s, P_s = sensor.step(w_k=env_seq["w"][k], v_k=env_seq["v"][k])
+        else:
+            x_true, y_k, x_s, P_s = sensor.step()
+
+        # ------------------------------------------------------------------
+        # Canonical sensor decision (= content of a non-predictive packet)
+        # ------------------------------------------------------------------
+        sensor_info = evaluate_decision(
+            x_hat=x_s, P=P_s,
+            c=estimator.c, Delta=estimator.Delta,
+            alpha_fp=estimator.alpha_fp, alpha_fn=estimator.alpha_fn,
+            previous_decision=sensor_prev_decision,
+        )
+        if sensor_info["region"] == "confusion":
+            s_hat = float((estimator.c.T @ x_s).item())
+            sensor_current_decision = 1 if s_hat >= estimator.xi else 0
+        else:
+            sensor_current_decision = int(sensor_info["pi"])
+
+        # ------------------------------------------------------------------
+        # Policy decides whether to transmit
+        # ------------------------------------------------------------------
+        transmit = int(transmission_policy(
+            x_true=x_true, x_s=x_s, P_s=P_s,
+            x_hat_remote=None, P_remote=None, k=k,
+        ))
+
+        # ------------------------------------------------------------------
+        # Extract packet type from policy's last_prediction
+        # ------------------------------------------------------------------
+        is_predictive = False
+        predicted_step = None
+        predicted_decision_val = None
+
+        if transmit == 1:
+            pred_info = getattr(transmission_policy, "last_prediction", None) or {}
+            horizon = pred_info.get("predicted_horizon")
+            if (horizon is not None and int(horizon) > 0
+                    and hasattr(transmission_policy, "predicted_transition_step")):
+                is_predictive = True
+                predicted_step = transmission_policy.predicted_transition_step
+                predicted_decision_val = transmission_policy.predicted_state
+
+        predictive_tx_hist.append(int(is_predictive))
+
+        # ------------------------------------------------------------------
+        # Disruption state before estimator step
+        # ------------------------------------------------------------------
+        disruption_hist.append(int(getattr(estimator, "_disruption_active", 0)))
+
+        # ------------------------------------------------------------------
+        # Estimator step (decision-only)
+        # ------------------------------------------------------------------
+        est_kwargs = dict(
+            transmitted_decision=sensor_current_decision,
+            transmit=transmit, k=k, p_t=p_t,
+            is_predictive=is_predictive,
+            predicted_step=predicted_step,
+            predicted_decision=predicted_decision_val,
+        )
+        if env_seq is not None:
+            est_kwargs["disruption_onset_k"] = bool(env_seq["disruption_onset"][k])
+            est_kwargs["h2"]                 = env_seq["h2"][k]
+            est_kwargs["chan_u"]             = env_seq["chan"][k]
+
+        delta_k, decision_est = estimator.step(**est_kwargs)
+
+        # ------------------------------------------------------------------
+        # Canonical sensor transition detection (shared logic with Scenario 1)
+        # ------------------------------------------------------------------
+        if sensor_current_decision != sensor_prev_decision:
+            estimator.record_sensor_transition(
+                from_state=sensor_prev_decision,
+                delta_k=delta_k,
+            )
+            sensor_prev_decision = sensor_current_decision
+
+        # ------------------------------------------------------------------
+        # Error bookkeeping
+        # ------------------------------------------------------------------
+        true_value = float(estimator.c.T @ x_true)
+        true_event = 1 if true_value >= estimator.Delta else 0
+        est_event  = decision_est
+
+        true_values.append(true_value)
+        true_events.append(true_event)
+        est_events.append(est_event)
+        transmit_hist.append(transmit)
+        delta_hist.append(delta_k)
+        energy_hist.append(transmit * energy_per_tx)
+
+        if est_event == 1 and true_event == 0:
+            fp_idx.append(k)
+        if est_event == 0 and true_event == 1:
+            fn_idx.append(k)
+
+    # ------------------------------------------------------------------
+    # Convert to arrays
+    # ------------------------------------------------------------------
+    true_values    = np.array(true_values)
+    true_events    = np.array(true_events)
+    est_events     = np.array(est_events)
+    transmit_hist  = np.array(transmit_hist)
+    delta_hist     = np.array(delta_hist)
+    energy_hist    = np.array(energy_hist)
+    disruption_hist = np.array(disruption_hist, dtype=int)
+    predictive_tx_hist = np.array(predictive_tx_hist, dtype=int)
+
+    # ------------------------------------------------------------------
+    # Error rates
+    # ------------------------------------------------------------------
+    num_negative_truth = np.sum(true_events == 0)
+    num_positive_truth = np.sum(true_events == 1)
+    false_positive_rate = len(fp_idx) / num_negative_truth if num_negative_truth > 0 else 0.0
+    false_negative_rate = len(fn_idx) / num_positive_truth if num_positive_truth > 0 else 0.0
+
+    # ------------------------------------------------------------------
+    # Horizon statistics (same logic as simulate_system)
+    # ------------------------------------------------------------------
+    horizon_history       = estimator._horizon_history
+    horizon_state_history = estimator._horizon_state_history
+
+    pred_vals = [h for h in horizon_history if h > 0]
+    n_true_transitions = len(horizon_history)
+    avg_predicted_horizon_estimator = float(np.mean(pred_vals)) if pred_vals else float("nan")
+    avg_predicted_horizon_total = (
+        float(sum(pred_vals)) / n_true_transitions
+        if n_true_transitions > 0 else float("nan")
+    )
+
+    def _state_summary(L_list):
+        if not L_list:
+            return {"n_total": 0, "n_pred": 0, "n_ontime": 0, "n_miss": 0,
+                    "prob_L_geq_0": float("nan"), "avg_pred_horizon": float("nan")}
+        n_total  = len(L_list)
+        n_miss   = sum(1 for l in L_list if l < 0)
+        n_ontime = sum(1 for l in L_list if l == 0)
+        n_pred   = sum(1 for l in L_list if l > 0)
+        prob     = (n_pred + n_ontime) / n_total
+        pv       = [l for l in L_list if l > 0]
+        avg_ph   = float(np.mean(pv)) if pv else 0.0
+        return {"n_total": n_total, "n_pred": n_pred, "n_ontime": n_ontime,
+                "n_miss": n_miss, "prob_L_geq_0": prob, "avg_pred_horizon": avg_ph}
+
+    L_per_state = {0: [], 1: []}
+    for h, s in zip(horizon_history, horizon_state_history):
+        L_per_state[s].append(h)
+
+    stats_s0 = _state_summary(L_per_state[0])
+    stats_s1 = _state_summary(L_per_state[1])
+
+    all_L = list(horizon_history)
+    n_timely_overall = sum(1 for l in all_L if l >= 0)
+    n_early_overall  = sum(1 for l in all_L if l > 0)
+    prob_L_geq_0 = (float(n_timely_overall) / n_true_transitions
+                    if n_true_transitions > 0 else float("nan"))
+    prob_L_gt_0  = (float(n_early_overall)  / n_true_transitions
+                    if n_true_transitions > 0 else float("nan"))
+
+    total_energy = float(np.sum(energy_hist))
+    avg_energy   = total_energy / T
+    total_disruption_steps = int(np.sum(disruption_hist))
+
+    def _fmt_nan(v, fmt=".4f"):
+        return "nan" if math.isnan(float(v)) else format(float(v), fmt)
+
+    print(f"False Positive Rate (FPR):  {false_positive_rate:.4f}")
+    print(f"False Negative Rate (FNR):  {false_negative_rate:.4f}")
+    print(f"P(L >= 0) overall:          {_fmt_nan(prob_L_geq_0)}")
+    print(f"P(L >  0) overall:          {_fmt_nan(prob_L_gt_0)}")
+    print(f"Transitions (sensor-side):  {n_true_transitions}")
+    for label, st in [("0->1 (alarm onset)", stats_s0),
+                      ("1->0 (alarm clear)", stats_s1)]:
+        print(f"  [{label}] total={st['n_total']:4d} "
+              f"| pred(L>0)={st['n_pred']:4d} "
+              f"| on-time(L=0)={st['n_ontime']:4d} "
+              f"| miss={st['n_miss']:4d} "
+              f"| P(L>=0)={_fmt_nan(st['prob_L_geq_0'])} "
+              f"| E[L|L>0]={_fmt_nan(st['avg_pred_horizon'])}")
+    print(f"Total Energy:               {total_energy:.6e} J")
+    print(f"Avg Energy per Step:        {avg_energy:.6e} J")
+    print(f"Disruption steps:           {total_disruption_steps} / {T}")
+    print(f"Total successful receptions:{np.sum(delta_hist)} / {T}")
+    print(f"Total transmission attempts:{np.sum(transmit_hist)} / {T}")
+
+    rec_metrics = estimator.metrics_tracker.compute_metrics()
+    theta_info  = {"theta_0": estimator.theta_0, "theta_1": estimator.theta_1}
+
+    return {
+        "true_values":   true_values,
+        "true_events":   true_events,
+        "est_events":    est_events,
+        "transmit_hist": transmit_hist,
+        "delta_hist":    delta_hist,
+        "energy_hist":   energy_hist,
+        "disruption_hist": disruption_hist,
+        "predictive_tx_hist": predictive_tx_hist,
+        "fp_idx": np.array(fp_idx),
+        "fn_idx": np.array(fn_idx),
+        "fpr": false_positive_rate,
+        "fnr": false_negative_rate,
+        "prob_L_geq_0":           prob_L_geq_0,
+        "prob_L_gt_0":            prob_L_gt_0,
+        "avg_predicted_horizon":       avg_predicted_horizon_estimator,
+        "avg_predicted_horizon_total": avg_predicted_horizon_total,
+        "L_per_state":        L_per_state,
+        "stats_s0":           stats_s0,
+        "stats_s1":           stats_s1,
+        "n_true_transitions": n_true_transitions,
+        "horizon_history":    horizon_history,
+        "total_energy": total_energy,
+        "avg_energy":   avg_energy,
+        "theta":          theta_info,
+        "n_tp":           rec_metrics["n_tp"],
+        "n_fp":           rec_metrics["n_fp"],
+        "total_triggers": rec_metrics["total_triggers"],
+        # rate/p_t placeholders for table compatibility
+        "p_t":  p_t,
+        "rate": None,
+    }
+
 
 def plot_results(results, Delta):
     import numpy as np
@@ -1294,6 +1886,190 @@ def plot_results(results, Delta):
 
     plt.tight_layout()
     plt.show()
+
+
+def plot_results_2(all_results, Delta, scenario_name=""):
+    """
+    Show all 5 methods at once — one figure window per method, same layout as
+    plot_results (signal plot top, update events bottom).
+
+    Extra markers beyond the orignal plot_results:
+      Gold star  : predictive update received (resilient_predictive / predictive —
+                   policy sent a future-transition announcement that arrived).
+      Gold x     : predictive packet transmitted but lost.
+      Purple ◆   : filter-based estimator-ahead update — a regular successful
+                   reception where the Kalman estimator is already in state 1
+                   while truth is still in state 0 (estimator predicts the
+                   transition by itself, without an explicit predictive packet).
+                   Only present when est_values comes from a real Kalman filter
+                   (filter_based paradigm); not shown in decision_adoption mode.
+
+    Call plt.show() after this function to display all 5 windows simultaneously.
+    """
+    import matplotlib.pyplot as plt
+
+    METHOD_COLORS = {
+        "resilient_predictive": "#1f77b4",
+        "predictive":           "#ff7f0e",
+        "event_trigger":        "#2ca02c",
+        "probability":          "#d62728",
+        "aoii":                 "#9467bd",
+    }
+
+    def _shade(ax1, ax2, disruption_hist):
+        in_d, d0, labeled = False, 0, False
+        for ki, d in enumerate(disruption_hist):
+            if d == 1 and not in_d:
+                in_d, d0 = True, ki
+            elif d == 0 and in_d:
+                in_d = False
+                lbl = "Disruption" if not labeled else ""
+                ax1.axvspan(d0, ki, color="purple", alpha=0.15, label=lbl)
+                ax2.axvspan(d0, ki, color="purple", alpha=0.15)
+                labeled = True
+        if in_d:
+            lbl = "Disruption" if not labeled else ""
+            ax1.axvspan(d0, len(disruption_hist), color="purple", alpha=0.15, label=lbl)
+            ax2.axvspan(d0, len(disruption_hist), color="purple", alpha=0.15)
+
+    def _fmt(v):
+        try:
+            f = float(v)
+            return "N/A" if math.isnan(f) else f"{f:.4f}"
+        except Exception:
+            return "N/A"
+
+    title_suffix = f"  [{scenario_name}]" if scenario_name else ""
+
+    for method_name, res in all_results.items():
+        T_len = len(res["true_values"])
+        t     = np.arange(T_len)
+
+        true_values     = np.asarray(res["true_values"])
+        true_events     = np.asarray(res["true_events"])
+        est_events      = np.asarray(res["est_events"])
+        transmit_hist   = np.asarray(res["transmit_hist"])
+        delta_hist      = np.asarray(res["delta_hist"])
+        fp_idx          = np.asarray(res["fp_idx"])
+        fn_idx          = np.asarray(res["fn_idx"])
+        disruption_hist = np.asarray(res.get("disruption_hist", np.zeros(T_len, dtype=int)))
+        pred_tx_hist    = np.asarray(res.get("predictive_tx_hist", np.zeros(T_len, dtype=int)))
+
+        # est_values: real Kalman output (filter_based) or synthesised from binary decisions
+        has_real_est = "est_values" in res
+        if has_real_est:
+            est_values = np.asarray(res["est_values"])
+        else:
+            step = float(np.std(true_values)) * 0.5 or 0.1
+            est_values = Delta + (est_events.astype(float) * 2 - 1) * step
+
+        # ── index sets ────────────────────────────────────────────────────
+        reg_rx_idx    = np.where((pred_tx_hist == 0) & (delta_hist == 1))[0]
+        pred_rx_idx   = np.where((pred_tx_hist == 1) & (delta_hist == 1))[0]
+        pred_fail_idx = np.where((pred_tx_hist == 1) & (delta_hist == 0))[0]
+        reg_fail_idx  = np.where((pred_tx_hist == 0) & (transmit_hist == 1) & (delta_hist == 0))[0]
+
+        # Filter-based estimator-ahead: a regular successful reception where the
+        # Kalman estimator is already in state 1 while truth is still in state 0.
+        # Only meaningful for probability and aoii policies (filter_based paradigm).
+        # event_trigger fires *after* the true transition, so it can never be
+        # "ahead"; resilient_predictive/predictive already have gold markers.
+        EST_AHEAD_POLICIES = {"probability", "aoii"}
+        if has_real_est and method_name in EST_AHEAD_POLICIES:
+            est_ahead_idx = np.where(
+                (pred_tx_hist == 0) & (delta_hist == 1) &
+                (est_events == 1) & (true_events == 0)
+            )[0]
+        else:
+            est_ahead_idx = np.array([], dtype=int)
+
+        color = METHOD_COLORS.get(method_name, "black")
+        fpr   = res.get("fpr", float("nan"))
+        fnr   = res.get("fnr", float("nan"))
+        avg_ph        = res.get("avg_predicted_horizon", float("nan"))
+        total_energy  = res.get("total_energy", float("nan"))
+        avg_energy    = res.get("avg_energy",   float("nan"))
+        n_pred_tx     = int(np.sum(pred_tx_hist))
+        total_dis     = int(np.sum(disruption_hist))
+
+        fig, (ax1, ax2) = plt.subplots(
+            2, 1, figsize=(14, 8), sharex=True,
+            gridspec_kw={"height_ratios": [5, 1]}
+        )
+        fig.suptitle(f"{method_name}{title_suffix}", fontsize=12, fontweight="bold")
+
+        _shade(ax1, ax2, disruption_hist)
+
+        # ── Top: signal plot ──────────────────────────────────────────────
+        ax1.plot(t, true_values, label=r"True $c^T x_k$", linewidth=2)
+        ax1.plot(t, est_values,  label=r"Estimator $c^T \hat{x}_k$", linewidth=2,
+                 linestyle="-" if has_real_est else "--")
+        ax1.axhline(Delta, linestyle="--", color="gray", linewidth=1.2,
+                    label=r"Threshold $\Delta$")
+
+        for i, k in enumerate(fp_idx):
+            ax1.axvline(x=k, color="red", linestyle=":", linewidth=1.5, alpha=0.9,
+                        label="False Positive" if i == 0 else "")
+        for i, k in enumerate(fn_idx):
+            ax1.axvline(x=k, color="green", linestyle="--", linewidth=1.5, alpha=0.9,
+                        label="False Negative" if i == 0 else "")
+        # Gold vertical line where a predictive packet was successfully received
+        for i, k in enumerate(pred_rx_idx):
+            ax1.axvline(x=k, color="gold", linewidth=2.0, alpha=0.8,
+                        label="Predictive update (rcvd)" if i == 0 else "")
+        # Purple vertical line for filter-based estimator-ahead updates
+        for i, k in enumerate(est_ahead_idx):
+            ax1.axvline(x=k, color="mediumpurple", linewidth=1.5, alpha=0.7,
+                        label="Est. ahead of truth" if i == 0 else "")
+
+        textstr = (
+            f"FPR = {fpr:.4f}   FNR = {fnr:.4f}\n"
+            f"E[L|L>0] = {_fmt(avg_ph)}\n"
+            f"Total Energy = {_fmt(total_energy)} J\n"
+            f"Avg Energy/Step = {_fmt(avg_energy)} J\n"
+            f"Predictive tx = {n_pred_tx}   Disruption steps = {total_dis}"
+        )
+        ax1.text(0.02, 0.98, textstr, transform=ax1.transAxes,
+                 verticalalignment="top", fontsize=8,
+                 bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
+        ax1.set_ylabel(r"Value of $c^T x$")
+        ax1.grid(True, alpha=0.4)
+        ax1.legend(loc="upper right", fontsize=8)
+
+        # ── Bottom: update events ─────────────────────────────────────────
+        ax2.axhline(0, color="black", linewidth=1)
+
+        if len(reg_rx_idx) > 0:
+            ax2.scatter(reg_rx_idx, np.zeros(len(reg_rx_idx)),
+                        marker="o", s=50, color="blue", zorder=3,
+                        label="Successful update")
+        if len(reg_fail_idx) > 0:
+            ax2.scatter(reg_fail_idx, np.zeros(len(reg_fail_idx)),
+                        marker="x", s=60, color="orange", zorder=3,
+                        label="Failed update")
+        if len(pred_rx_idx) > 0:
+            ax2.scatter(pred_rx_idx, np.zeros(len(pred_rx_idx)),
+                        marker="*", s=150, color="gold", zorder=5,
+                        label="Predictive update (rcvd)")
+        if len(pred_fail_idx) > 0:
+            ax2.scatter(pred_fail_idx, np.zeros(len(pred_fail_idx)),
+                        marker="x", s=90, color="goldenrod", zorder=4,
+                        label="Predictive update (lost)")
+        if len(est_ahead_idx) > 0:
+            ax2.scatter(est_ahead_idx, np.zeros(len(est_ahead_idx)),
+                        marker="D", s=60, color="mediumpurple", zorder=4,
+                        label="Est. ahead of truth")
+
+        ax2.set_ylim(-1, 1)
+        ax2.set_yticks([])
+        ax2.set_xlabel("Time step k")
+        ax2.set_ylabel("Updates")
+        ax2.grid(True, axis="x")
+        ax2.legend(loc="best", fontsize=8)
+
+        plt.tight_layout()
+
+    # Caller calls plt.show() after this to render all windows simultaneously.
 
 
 def plot_horizon_histograms(all_results, policy_names=None, x_cap=15):

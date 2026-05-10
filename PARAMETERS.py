@@ -20,7 +20,7 @@ dt = 1.0                               # Sampling time
 # SIMULATION
 # =============================================================================
 
-T       = 100000                         # Total simulation steps
+T       = 5000                         # Total simulation steps
 Delta   = 5.0                          # Disruption magnitude
 # epsilon = 0.01                          # Perturbation parameter
 
@@ -50,7 +50,7 @@ XI_WEIGHT_FN = 1.0                     # Penalty weight for false negatives
 
 BLOCKLENGTH_N      = 128               # Block length n
 INFO_BITS_L        = 256                # Information bits L
-CHANNEL_NOISE_VAR  = 1.0               # Channel noise variance
+CHANNEL_NOISE_VAR  = 0.1               # Channel noise variance
 
 PT_MIN = 0.05                          # Minimum transmission power
 PT_MAX = 200                            # Maximum transmission power
@@ -64,7 +64,7 @@ P_T = 20
 # RECOVERY MODEL
 # =============================================================================
 
-P_R               = 0.02              # Recovery probability per step
+P_R               = 0.01              # Recovery probability per step
 EPSILON_L         = 0.05             # Loss probability threshold
 TH_RECOVERY_LAMBDA = 4.0              # Recovery threshold lambda
 TH_RECOVERY_KAPPA  = 2.0              # Recovery threshold kappa
@@ -99,3 +99,37 @@ DEBUG_MAX_STEPS                = 100
 DEBUG_SEED                     = 42
 DEBUG_VERBOSE_STEPS            = 50
 DEBUG_OUT_PATH                 = "sensor_predictive_horizon_debug.png"
+
+# Finite-blocklength unit convention
+INFO_BITS_UNIT = "bits"   # use "nats" only if you want to reproduce the old printed formula directly
+
+# Outage expectation approximation
+OUTAGE_I_METHOD = "empirical"        # "mean" or "empirical"
+OUTAGE_D_METHOD = "distribution"     # "mean" or "distribution"
+OUTAGE_I_SAMPLE_CAP = 1000
+OUTAGE_I_SAMPLE_SEED = 123
+#OUTAGE_CONSTRAINT_METHOD = "upper_bound_simple"
+OUTAGE_CONSTRAINT_METHOD = "blackout_per_sojourn"
+
+
+
+# =============================================================================
+# RESILIENCE DESIGN
+# =============================================================================
+
+EPSILON_R = 0.10
+
+# This should stay True for the final formulation.
+REQUIRE_STATEWISE_LEAD_TIME = True
+
+# Optional. Leave inactive unless you intentionally want a stricter design.
+PHIT_SAFETY_FACTOR = 2.5 # increase this make better P(L>=0)
+PHIT_SAFETY_MARGIN = 0.0
+
+# Optional numerical design margin. If omitted, it equals EPSILON_L.
+# EPSILON_L_DESIGN = 0.045
+
+PHIT_SAMPLE_CAP = 3000
+PHIT_SAMPLE_SEED = 123
+DESIGN_TAIL_TOL = 1e-10
+

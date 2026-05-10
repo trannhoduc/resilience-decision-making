@@ -2,20 +2,27 @@
 Baseline calibration for the resilience-decision-making simulation.
 
 Given the proposed policy's optimal transmit power p_t_star and its average
-transmission rate r_prop, this module computes transmit powers (and, for the
-probability baseline, a per-slot transmission probability) for three baselines
-so that every baseline matches the same average energy budget
+transmission rate r_prop, this module computes transmit powers and scheduling
+parameters for baselines so that every baseline matches the same average
+energy budget
 
-    E = p_t_star * r_prop   (packets/slot × power = energy/slot).
+    E = p_t_star * r_prop
 
-The three baselines are:
-  1. Predictive-only      — one transmission per Markov sojourn, no resilience
-                            updates (p_u0 = p_u1 = 0).
-  2. Event-triggered      — same rate and power as predictive-only (one
-                            transmission per sojourn under the surrogate).
-  3. Probability-based    — Bernoulli-p per slot; the transmit power p_t is
-                            chosen to maximise packet-success rate per unit
-                            energy within [E, p_t_max], then p = E / p_t.
+The baselines are:
+  1. Predictive-only
+  2. Event-triggered
+  3. Probability-based
+  4. AoII-based
+
+Important:
+AoI detection thresholds are computed from each baseline's effective successful
+update rate, not directly from the Markov sojourn probability. This is more
+consistent with the AoI-tail approximation
+
+    P(AoI > theta) ≈ (1 - eta)^theta,
+
+where eta is the per-slot probability of receiving a useful update under
+normal operation.
 """
 
 from __future__ import annotations
@@ -25,6 +32,63 @@ from typing import Callable, Dict
 
 import numpy as np
 from scipy.optimize import minimize_scalar
+
+
+def _clip_probability(x: float, eps: float = 1e-12) -> float:
+    """
+    Keep a probability strictly inside (0, 1) to avoid log(0)
+    and division problems.
+    """
+    return min(max(float(x), eps), 1.0 - eps)
+
+
+def _theta_from_eta(eta: float, epsilon_r: float) -> int:
+    """
+    Compute the smallest integer theta satisfying
+
+        P(AoI > theta) ≈ (1 - eta)^theta <= epsilon_r.
+
+    Hence,
+
+        theta >= log(epsilon_r) / log(1 - eta).
+
+    Parameters
+    ----------
+    eta : float
+        Effective per-slot successful update probability.
+    epsilon_r : float
+        Target false-trigger probability.
+
+    Returns
+    -------
+    int
+        AoI detection threshold.
+    """
+    eta = _clip_probability(eta)
+    epsilon_r = _clip_probability(epsilon_r)
+
+    theta = int(math.ceil(math.log(epsilon_r) / math.log(1.0 - eta)))
+
+    # AoI threshold should be at least 1.
+    return max(theta, 1)
+
+
+def _expected_min_W_T(W_s: int, q_ss: float, q_s_other: float) -> float:
+    """
+    E[min(W_s, T_s)] where T_s is geometric with transition probability
+    q_s_other and self-transition probability q_ss = 1 - q_s_other.
+
+    This is the expected number of attempted AoII transmissions inside
+    a state-s sojourn when the policy transmits for at most W_s slots.
+    """
+    W_s = int(W_s)
+    if W_s <= 0:
+        return 0.0
+
+    q_ss = float(q_ss)
+    q_s_other = float(q_s_other)
+
+    return (1.0 - q_ss ** W_s) / q_s_other
 
 
 def calibrate_baselines(
@@ -41,41 +105,37 @@ def calibrate_baselines(
 
     Parameters
     ----------
-    p_t_star      : Optimal transmit power of the proposed policy (scalar).
-    r_prop        : Average transmission rate of the proposed policy
-                    (packets/slot), computed from the two-state Markov
-                    surrogate with resilience updates included.
-    q01           : Markov surrogate transition probability 0→1.
-    q10           : Markov surrogate transition probability 1→0.
-    epsilon_bar_fn: Callable(p_t) → average PER; implements Eq. (8).
-                    Should accept a single float and return a float in [0,1].
-    p_t_max       : Maximum allowed transmit power.
+    p_t_star : float
+        Optimal transmit power of the proposed policy.
+    r_prop : float
+        Average transmission rate of the proposed policy.
+    q01 : float
+        Markov surrogate transition probability 0 -> 1.
+    q10 : float
+        Markov surrogate transition probability 1 -> 0.
+    epsilon_bar_fn : Callable[[float], float]
+        Function returning the average packet error probability at power p_t.
+    p_t_max : float
+        Maximum allowed transmit power.
 
     Returns
     -------
-    dict with structure::
-
-        {
-          'predictive':  {'p_t': float, 'rate': float, 'feasible': bool},
-          'event':       {'p_t': float, 'rate': float, 'feasible': bool},
-          'probability': {'p_t': float, 'p': float,
-                          'feasible': bool, 'boundary_hit': bool},
-          'energy_budget': float,
-        }
-
-    Raises
-    ------
-    ValueError
-        If the energy budget E exceeds p_t_max, making every single-slot
-        transmission infeasible.
+    Dict
+        Calibration result for predictive, event, probability, and AoII baselines.
     """
     p_t_star = float(p_t_star)
-    r_prop   = float(r_prop)
-    q01      = float(q01)
-    q10      = float(q10)
-    p_t_max  = float(p_t_max)
+    r_prop = float(r_prop)
+    q01 = float(q01)
+    q10 = float(q10)
+    p_t_max = float(p_t_max)
 
-    E = p_t_star * r_prop  # energy budget (energy per slot)
+    if q01 <= 0.0 or q10 <= 0.0:
+        raise ValueError(f"q01 and q10 must be positive, got q01={q01}, q10={q10}.")
+
+    E = p_t_star * r_prop
+
+    if E <= 0.0:
+        raise ValueError(f"Energy budget must be positive, got E={E}.")
 
     if E > p_t_max:
         raise ValueError(
@@ -83,48 +143,60 @@ def calibrate_baselines(
             "The proposed design is infeasible under the given power constraint."
         )
 
+    q00 = 1.0 - q01
+    q11 = 1.0 - q10
+
+    cycle_length = 1.0 / q01 + 1.0 / q10
+    pi_0 = q10 / (q01 + q10)
+    pi_1 = q01 / (q01 + q10)
+
     # ------------------------------------------------------------------
-    # 1 & 2.  Predictive-only / Event-triggered
+    # 1 & 2. Predictive-only / Event-triggered
     #
-    # Under the two-state Markov surrogate with no resilience updates
-    # (p_u0 = p_u1 = 0), the average transmission rate reduces to:
+    # Under the two-state surrogate, both transmit once per sojourn.
+    # Average transmission rate:
     #
-    #   r_pred = 2 / (1/q01 + 1/q10) = 2 q01 q10 / (q01 + q10)
+    #   r_pred = 2 / (1/q01 + 1/q10)
     #
-    # The transmit power is then set so that p_t_pred * r_pred = E.
+    # The transmit power is selected to match the energy budget:
+    #
+    #   p_t_pred * r_pred = E.
     # ------------------------------------------------------------------
-    r_pred          = 2.0 * q01 * q10 / (q01 + q10)
-    p_t_pred_ideal  = E / r_pred                        # unconstrained power
-    feasible_pred   = bool(p_t_pred_ideal <= p_t_max)
-    # Cap to the hardware limit.  When infeasible the baseline runs at p_t_max
-    # (energy slightly above budget); that is noted via feasible=False.
+    r_pred = 2.0 * q01 * q10 / (q01 + q10)
+
+    p_t_pred_ideal = E / r_pred
+    feasible_pred = bool(p_t_pred_ideal <= p_t_max)
     p_t_pred = min(p_t_pred_ideal, p_t_max)
 
     # ------------------------------------------------------------------
-    # 3.  Probability-based (Bernoulli-p per slot)
+    # 3. Probability baseline
     #
-    # Choose p_t to maximise packet-success rate per unit power:
+    # Choose p_t to maximize successful delivery per unit power:
     #
-    #   p_t_prob = argmax_{p_t in [E, p_t_max]}  (1 - eps_bar(p_t)) / p_t
+    #   maximize (1 - eps_bar(p_t)) / p_t
     #
-    # The transmission probability is then p_prob = E / p_t_prob,
-    # ensuring  p_prob * p_t_prob = E  (energy-budget constraint).
+    # over p_t in [E, p_t_max].
     #
-    # The search lower bound is E because p_prob = E/p_t ≤ 1 requires
-    # p_t ≥ E.  If the optimum sits at the lower boundary (p_t_prob ≈ E),
-    # p_prob = 1 is optimal and we flag it as 'boundary_hit'.
+    # Then p_prob = E / p_t_prob so that:
+    #
+    #   p_prob * p_t_prob = E.
     # ------------------------------------------------------------------
     def _neg_efficiency(p_t: float) -> float:
         eps = float(epsilon_bar_fn(p_t))
-        return -((1.0 - eps) / p_t)
+        eps = _clip_probability(eps)
+        return -((1.0 - eps) / float(p_t))
 
-    search   = minimize_scalar(_neg_efficiency, bounds=(E, p_t_max), method="bounded")
+    search = minimize_scalar(
+        _neg_efficiency,
+        bounds=(E, p_t_max),
+        method="bounded",
+    )
+
     p_t_prob = float(search.x)
-    p_prob   = E / p_t_prob
+    p_prob = E / p_t_prob
 
-    # Boundary detection: p_t_prob indistinguishable from lower bound E
-    boundary_hit  = bool(abs(p_t_prob - E) < 1e-6 * E + 1e-9)
-    feasible_prob = bool(p_t_prob <= p_t_max)
+    boundary_hit = bool(abs(p_t_prob - E) < 1e-6 * E + 1e-9)
+    feasible_prob = bool(p_t_prob <= p_t_max and p_prob <= 1.0)
 
     assert abs(p_t_prob * p_prob - E) < 1e-6, (
         f"Energy check failed for probability baseline: "
@@ -133,74 +205,65 @@ def calibrate_baselines(
     )
 
     # ------------------------------------------------------------------
-    # 4. AoII — per-state retransmission windows (no ACK/NACK feedback)
+    # 4. AoII baseline
     #
-    # After transition INTO state s, sensor transmits for W_s slots.
-    # Actual packets sent = min(W_s, T_s) since sojourn may end early.
-    # W_s is capped at floor(E[T_s]) to prevent degeneration.
+    # After a transition into state s, AoII transmits for W_s slots.
+    # Actual attempts in a sojourn are min(W_s, T_s).
     #
-    # E[min(W_s, T_s)] = (1 - q_ss^W_s) / q_{s,1-s}
-    #   where q_ss = 1 - q_{s,1-s}
-    #
-    # Rate: r = (E[min(W0,T0)] + E[min(W1,T1)]) / cycle_length
-    # Energy: p_t * r = E
-    # Miss prob per state:
-    #   P_miss_s = (1-q_ss)*eps*(1-(q_ss*eps)^W_s)/(1-q_ss*eps) + (q_ss*eps)^W_s
-    # Weighted: P_miss = pi_0 * P_miss_0 + pi_1 * P_miss_1
+    # We choose W_0, W_1 to minimize the weighted miss probability under
+    # the same energy budget.
     # ------------------------------------------------------------------
-    cycle_length = 1.0 / q01 + 1.0 / q10
-    q00 = 1.0 - q01
-    q11 = 1.0 - q10
-    pi_0 = q10 / (q01 + q10)
-    pi_1 = q01 / (q01 + q10)
+    W0_max = max(int(math.floor(1.0 / q01)), 1)
+    W1_max = max(int(math.floor(1.0 / q10)), 1)
 
-    W0_max = int(math.floor(1.0 / q01))   # floor(E[T_0])
-    W1_max = int(math.floor(1.0 / q10))   # floor(E[T_1])
-    # Ensure at least 1
-    W0_max = max(W0_max, 1)
-    W1_max = max(W1_max, 1)
+    def p_miss_state(W_s: int, q_ss: float, eps: float) -> float:
+        """
+        Probability that all AoII packets in a state-s sojourn fail.
 
-    def expected_min_W_T(W_s, q_ss, q_s_other):
-        """E[min(W_s, T_s)] where T_s ~ Geom(q_{s,1-s})"""
+        The number of attempts is min(W_s, T_s), where T_s is geometric.
+        """
+        W_s = int(W_s)
+        eps = _clip_probability(eps)
+
         if W_s <= 0:
-            return 0.0
-        return (1.0 - q_ss ** W_s) / q_s_other
-
-    def p_miss_state(W_s, q_ss, eps):
-        """P(all min(W_s, T_s) packets fail)"""
-        if W_s <= 0 or eps <= 0:
-            return 0.0
-        if eps >= 1.0:
             return 1.0
+
         q_ss_eps = q_ss * eps
+
         if abs(1.0 - q_ss_eps) < 1e-15:
-            # Degenerate case
             return eps ** W_s
+
         term1 = (1.0 - q_ss) * eps * (1.0 - q_ss_eps ** W_s) / (1.0 - q_ss_eps)
         term2 = q_ss_eps ** W_s
+
         return term1 + term2
 
     best_W0 = None
     best_W1 = None
-    best_p_miss_aoii = 1.0
+    best_p_miss_aoii = float("inf")
     best_p_t_aoii = None
 
     for W0_cand in range(1, W0_max + 1):
         for W1_cand in range(1, W1_max + 1):
-            e_min_0 = expected_min_W_T(W0_cand, q00, q01)
-            e_min_1 = expected_min_W_T(W1_cand, q11, q10)
+            e_min_0 = _expected_min_W_T(W0_cand, q00, q01)
+            e_min_1 = _expected_min_W_T(W1_cand, q11, q10)
+
             rate_cand = (e_min_0 + e_min_1) / cycle_length
 
-            if rate_cand <= 0:
+            if rate_cand <= 0.0:
                 continue
 
             p_t_cand = E / rate_cand
-            if p_t_cand <= 0 or p_t_cand > p_t_max:
+
+            if p_t_cand <= 0.0 or p_t_cand > p_t_max:
                 continue
 
             eps = float(epsilon_bar_fn(p_t_cand))
+            eps = _clip_probability(eps)
+
             pm0 = p_miss_state(W0_cand, q00, eps)
             pm1 = p_miss_state(W1_cand, q11, eps)
+
             p_miss_cand = pi_0 * pm0 + pi_1 * pm1
 
             if p_miss_cand < best_p_miss_aoii:
@@ -211,41 +274,53 @@ def calibrate_baselines(
 
     if best_W0 is None:
         aoii_feasible = False
+
         best_W0 = 1
         best_W1 = 1
-        e0 = expected_min_W_T(1, q00, q01)
-        e1 = expected_min_W_T(1, q11, q10)
-        best_p_t_aoii = E / ((e0 + e1) / cycle_length)
+
+        e_min_0 = _expected_min_W_T(best_W0, q00, q01)
+        e_min_1 = _expected_min_W_T(best_W1, q11, q10)
+
+        rate_aoii_fallback = (e_min_0 + e_min_1) / cycle_length
+        best_p_t_aoii = min(E / rate_aoii_fallback, p_t_max)
+
+        eps = float(epsilon_bar_fn(best_p_t_aoii))
+        eps = _clip_probability(eps)
+
+        pm0 = p_miss_state(best_W0, q00, eps)
+        pm1 = p_miss_state(best_W1, q11, eps)
+        best_p_miss_aoii = pi_0 * pm0 + pi_1 * pm1
     else:
         aoii_feasible = True
 
-    e_min_0_best = expected_min_W_T(best_W0, q00, q01)
-    e_min_1_best = expected_min_W_T(best_W1, q11, q10)
+    e_min_0_best = _expected_min_W_T(best_W0, q00, q01)
+    e_min_1_best = _expected_min_W_T(best_W1, q11, q10)
     rate_aoii = (e_min_0_best + e_min_1_best) / cycle_length
 
     return {
         "predictive": {
-            "p_t":      p_t_pred,
-            "rate":     r_pred,
+            "p_t": p_t_pred,
+            "rate": r_pred,
             "feasible": feasible_pred,
         },
         "event": {
-            "p_t":      p_t_pred,
-            "rate":     r_pred,
+            "p_t": p_t_pred,
+            "rate": r_pred,
             "feasible": feasible_pred,
         },
         "probability": {
-            "p_t":          p_t_prob,
-            "p":            p_prob,
-            "feasible":     feasible_prob,
+            "p_t": p_t_prob,
+            "p": p_prob,
+            "rate": p_prob,
+            "feasible": feasible_prob,
             "boundary_hit": boundary_hit,
         },
         "aoii": {
-            "p_t":      best_p_t_aoii,
-            "W_0":      best_W0,
-            "W_1":      best_W1,
-            "rate":     rate_aoii,
-            "p_miss":   best_p_miss_aoii,
+            "p_t": best_p_t_aoii,
+            "W_0": best_W0,
+            "W_1": best_W1,
+            "rate": rate_aoii,
+            "p_miss": best_p_miss_aoii,
             "feasible": aoii_feasible,
         },
         "energy_budget": E,
@@ -262,97 +337,197 @@ def compute_baseline_thresholds(
     epsilon_bar_fn: Callable[[float], float],
 ) -> Dict:
     """
-    Compute the AoI threshold each baseline uses to declare an outage.
+    Compute the AoI threshold each method uses to declare an outage.
 
-    Each baseline's theta is derived from that baseline's own AoI distribution
-    under normal operation, using the same false-trigger probability epsilon_r
-    across all methods.
+    The proposed method keeps its optimized theta values.
 
-    Baseline-specific formulas
-    --------------------------
+    For baselines, the thresholds are computed using the effective successful
+    update probability eta under normal operation:
 
-    PROPOSED: pass-through — proposed_theta_0 and proposed_theta_1 are
-    returned unchanged from Algorithm 2.
+        P(AoI > theta) ≈ (1 - eta)^theta.
 
-    EVENT-TRIGGERED and PREDICTIVE-ONLY (one packet per sojourn):
-        P(AoI > theta | no outage) = q_ss^theta
-        theta_s = ceil( log(epsilon_r) / log(q_ss) )
-        where q00 = 1 - q01, q11 = 1 - q10.
+    This is more consistent than directly using q_ss^theta for all baselines,
+    because AoI is controlled by successful receptions, not only by the
+    physical state sojourn duration.
 
-    PROBABILITY (every slot, delivery probability eta = p_prob*(1-eps_bar(p_t_prob))):
-        P(AoI > theta) = (1 - eta)^theta
-        theta = ceil( log(epsilon_r) / log(1 - eta) )
-        State-independent (single theta for both states).
+    Baseline threshold rules
+    ------------------------
 
-    AoII (burst of W_s packets at sojourn start, then silent):
-        P(AoI > theta | burst success) ≈ q_ss^(W_s + theta)
-        theta_s = ceil( log(epsilon_r) / log(q_ss) - W_s )
+    Proposed:
+        theta_0, theta_1 are passed through from the proposed optimization.
 
-    Parameters
-    ----------
-    q01               : Markov surrogate transition probability 0 → 1.
-    q10               : Markov surrogate transition probability 1 → 0.
-    epsilon_r         : False-trigger probability target (from the proposed
-                        method's optimization result).
-    calibration_results : Output of calibrate_baselines; provides p_prob,
-                        p_t_prob (for probability) and W_0, W_1 (for AoII).
-    proposed_theta_0  : Proposed method's theta for state 0 (pass-through).
-    proposed_theta_1  : Proposed method's theta for state 1 (pass-through).
-    epsilon_bar_fn    : Callable(p_t) → average PER; used to compute the
-                        probability baseline's effective delivery rate.
+    Predictive-only:
+        Average update attempt rate:
+            r_pred = 2 q01 q10 / (q01 + q10)
 
-    Returns
-    -------
-    dict::
+        Effective successful update rate:
+            eta_pred = r_pred * (1 - eps_bar(p_t_pred))
 
-        {
-          'proposed':    {'theta_0': int, 'theta_1': int},
-          'predictive':  {'theta_0': int, 'theta_1': int},
-          'event':       {'theta_0': int, 'theta_1': int},
-          'probability': {'theta':   int},
-          'aoii':        {'theta_0': int, 'theta_1': int},
-        }
+        Single threshold:
+            theta_pred = ceil(log(epsilon_r) / log(1 - eta_pred))
+
+        The same value is used for both states.
+
+    Event-triggered:
+        Same rate and transmit power as predictive-only under the surrogate.
+        Therefore it uses the same eta and theta as predictive-only.
+
+    Probability:
+        Effective successful update rate:
+            eta_prob = p_prob * (1 - eps_bar(p_t_prob))
+
+        Single threshold:
+            theta_prob = ceil(log(epsilon_r) / log(1 - eta_prob))
+
+    AoII:
+        State-dependent attempt rates:
+            attempt_rate_0 = E[min(W_0,T_0)] / E[T_0]
+            attempt_rate_1 = E[min(W_1,T_1)] / E[T_1]
+
+        Since E[T_0] = 1/q01 and E[T_1] = 1/q10,
+
+            attempt_rate_0 = q01 * E[min(W_0,T_0)]
+            attempt_rate_1 = q10 * E[min(W_1,T_1)]
+
+        Effective successful update rates:
+            eta_aoii_0 = attempt_rate_0 * (1 - eps_bar(p_t_aoii))
+            eta_aoii_1 = attempt_rate_1 * (1 - eps_bar(p_t_aoii))
+
+        State-dependent thresholds:
+            theta_aoii_s = ceil(log(epsilon_r) / log(1 - eta_aoii_s))
     """
-    q01       = float(q01)
-    q10       = float(q10)
+    q01 = float(q01)
+    q10 = float(q10)
     epsilon_r = float(epsilon_r)
+
+    if q01 <= 0.0 or q10 <= 0.0:
+        raise ValueError(f"q01 and q10 must be positive, got q01={q01}, q10={q10}.")
 
     if not (0.0 < epsilon_r < 1.0):
         raise ValueError(f"epsilon_r must be in (0, 1), got {epsilon_r}.")
 
-    q00     = 1.0 - q01
-    q11     = 1.0 - q10
-    log_eps = math.log(epsilon_r)
+    q00 = 1.0 - q01
+    q11 = 1.0 - q10
 
-    # Event-triggered and predictive-only: geometric sojourn quantiles
-    theta_pred_0 = int(math.ceil(log_eps / math.log(q00)))
-    theta_pred_1 = int(math.ceil(log_eps / math.log(q11)))
+    # ------------------------------------------------------------------
+    # Proposed method: pass-through from optimization.
+    # ------------------------------------------------------------------
+    theta_prop_0 = max(int(proposed_theta_0), 1)
+    theta_prop_1 = max(int(proposed_theta_1), 1)
 
-    # Probability baseline: derive effective delivery rate from calibration
-    p_prob   = float(calibration_results["probability"]["p"])
+    # ------------------------------------------------------------------
+    # Predictive-only and event-triggered.
+    #
+    # Use effective successful update rate:
+    #
+    #   eta = transmission_rate * success_probability.
+    #
+    # Under the surrogate, predictive and event both transmit once per sojourn.
+    # ------------------------------------------------------------------
+    r_pred = float(calibration_results["predictive"]["rate"])
+    p_t_pred = float(calibration_results["predictive"]["p_t"])
+    eps_pred = float(epsilon_bar_fn(p_t_pred))
+
+    eta_pred = r_pred * (1.0 - eps_pred)
+    theta_pred = _theta_from_eta(eta_pred, epsilon_r)
+
+    # ------------------------------------------------------------------
+    # Probability baseline.
+    # ------------------------------------------------------------------
+    p_prob = float(calibration_results["probability"]["p"])
     p_t_prob = float(calibration_results["probability"]["p_t"])
-    eta      = p_prob * (1.0 - float(epsilon_bar_fn(p_t_prob)))
-    theta_prob = int(math.ceil(log_eps / math.log(1.0 - eta)))
+    eps_prob = float(epsilon_bar_fn(p_t_prob))
 
-    # AoII: burst of W_s slots reduces the residual wait
+    eta_prob = p_prob * (1.0 - eps_prob)
+    theta_prob = _theta_from_eta(eta_prob, epsilon_r)
+
+    # ------------------------------------------------------------------
+    # AoII baseline.
+    #
+    # AoII is state dependent. It transmits for W_s slots after entering
+    # state s, but the sojourn may end early. Therefore the average number
+    # of attempts in state s is E[min(W_s,T_s)].
+    #
+    # Effective per-slot attempt rate in state s:
+    #
+    #   E[min(W_s,T_s)] / E[T_s]
+    #
+    # Since E[T_0] = 1/q01 and E[T_1] = 1/q10:
+    #
+    #   attempt_rate_0 = q01 * E[min(W_0,T_0)]
+    #   attempt_rate_1 = q10 * E[min(W_1,T_1)]
+    # ------------------------------------------------------------------
     W_0 = int(calibration_results["aoii"]["W_0"])
     W_1 = int(calibration_results["aoii"]["W_1"])
-    theta_aoii_0 = int(math.ceil(log_eps / math.log(q00) - W_0))
-    theta_aoii_1 = int(math.ceil(log_eps / math.log(q11) - W_1))
+    p_t_aoii = float(calibration_results["aoii"]["p_t"])
+    eps_aoii = float(epsilon_bar_fn(p_t_aoii))
+
+    e_min_0 = _expected_min_W_T(W_0, q00, q01)
+    e_min_1 = _expected_min_W_T(W_1, q11, q10)
+
+    attempt_rate_aoii_0 = q01 * e_min_0
+    attempt_rate_aoii_1 = q10 * e_min_1
+
+    eta_aoii_0 = attempt_rate_aoii_0 * (1.0 - eps_aoii)
+    eta_aoii_1 = attempt_rate_aoii_1 * (1.0 - eps_aoii)
+
+    theta_aoii_0 = _theta_from_eta(eta_aoii_0, epsilon_r)
+    theta_aoii_1 = _theta_from_eta(eta_aoii_1, epsilon_r)
 
     result = {
-        "proposed":    {"theta_0": int(proposed_theta_0), "theta_1": int(proposed_theta_1)},
-        "predictive":  {"theta_0": theta_pred_0,          "theta_1": theta_pred_1},
-        "event":       {"theta_0": theta_pred_0,          "theta_1": theta_pred_1},
-        "probability": {"theta":   theta_prob},
-        "aoii":        {"theta_0": theta_aoii_0,          "theta_1": theta_aoii_1},
+        "proposed": {
+            "theta_0": theta_prop_0,
+            "theta_1": theta_prop_1,
+        },
+        "predictive": {
+            "theta_0": theta_pred,
+            "theta_1": theta_pred,
+        },
+        "event": {
+            "theta_0": theta_pred,
+            "theta_1": theta_pred,
+        },
+        "probability": {
+            "theta": theta_prob,
+        },
+        "aoii": {
+            "theta_0": theta_aoii_0,
+            "theta_1": theta_aoii_1,
+        },
+        "debug": {
+            "eta_pred": eta_pred,
+            "eta_prob": eta_prob,
+            "eta_aoii_0": eta_aoii_0,
+            "eta_aoii_1": eta_aoii_1,
+            "eps_pred": eps_pred,
+            "eps_prob": eps_prob,
+            "eps_aoii": eps_aoii,
+        },
     }
 
     print(f"\n  === Per-method AoI detection thresholds (epsilon_r = {epsilon_r:.4f}) ===")
-    print(f"    Proposed:       theta_0={result['proposed']['theta_0']}, theta_1={result['proposed']['theta_1']}")
-    print(f"    Event-trigger:  theta_0={result['event']['theta_0']}, theta_1={result['event']['theta_1']}")
-    print(f"    Predictive:     theta_0={result['predictive']['theta_0']}, theta_1={result['predictive']['theta_1']}")
-    print(f"    Probability:    theta={result['probability']['theta']}")
-    print(f"    AoII:           theta_0={result['aoii']['theta_0']}, theta_1={result['aoii']['theta_1']}")
+    print(
+        f"    Proposed:       theta_0={result['proposed']['theta_0']}, "
+        f"theta_1={result['proposed']['theta_1']}"
+    )
+    print(
+        f"    Event-trigger:  theta_0={result['event']['theta_0']}, "
+        f"theta_1={result['event']['theta_1']} "
+        f"(eta={eta_pred:.6f})"
+    )
+    print(
+        f"    Predictive:     theta_0={result['predictive']['theta_0']}, "
+        f"theta_1={result['predictive']['theta_1']} "
+        f"(eta={eta_pred:.6f})"
+    )
+    print(
+        f"    Probability:    theta={result['probability']['theta']} "
+        f"(eta={eta_prob:.6f})"
+    )
+    print(
+        f"    AoII:           theta_0={result['aoii']['theta_0']}, "
+        f"theta_1={result['aoii']['theta_1']} "
+        f"(eta_0={eta_aoii_0:.6f}, eta_1={eta_aoii_1:.6f})"
+    )
 
     return result

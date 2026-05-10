@@ -1,13 +1,33 @@
 import math
 from PARAMETERS import *
-from model import *
+from model import (
+    Model, RemoteEstimator, RemoteEstimatorDecisionOnly,
+    simulate_system, simulate_system_decision_only,
+    generate_env_sequences, build_policy,
+    plot_results, plot_horizon_histograms, export_horizon_histogram_full_csv,
+)
 from computation import evaluate_decision, precompute_all
-from resilience_design_gpt import solve_resilience_design, compute_average_packet_error_closed_form
+from resilience_design_revised import solve_resilience_design, compute_average_packet_error_closed_form
 from baselines import calibrate_baselines, compute_baseline_thresholds
 
 
 if __name__ == "__main__":
-    np.random.seed(23)
+    np.random.seed(14)
+
+    # ================================================================
+    # PARADIGM SELECTION
+    #   PARADIGM = "filter_based"      — paper Paradigm B: estimator
+    #                   receives full sensor state (x_s, P_s) and runs
+    #                   its own Kalman filter.
+    #   PARADIGM = "decision_adoption" — paper Paradigm A: estimator
+    #                   receives only the sensor's binary decision.
+    #                   For predictive and resilient_predictive,
+    #                   predictive packets carry a scheduled future
+    #                   transition; the estimator waits until that step
+    #                   to flip its decision.
+    #                   Reports: FPR, FNR, P(L>=0), P(L>0).
+    # ================================================================
+    PARADIGM = "filter_based"      # paper Paradigm B
 
     import PARAMETERS as P
 
@@ -230,7 +250,7 @@ if __name__ == "__main__":
 
     for (name, policy_type, est_kwargs, pol_kwargs) in POLICY_SPECS:
         print(f"\n{'='*60}")
-        print(f"Running policy: {name}")
+        print(f"Running policy: {name}  [{PARADIGM}]")
         print(f"{'='*60}")
 
         # Reset sensor to identical initial state
@@ -238,12 +258,18 @@ if __name__ == "__main__":
 
         p_t_for_policy = policy_p_t[policy_type]
 
-        estimator = RemoteEstimator(
-            **_est_base_kwargs,
-            **est_kwargs,
-        )
+        # -----------------------------------------------------------------
+        # Choose estimator class based on PARADIGM
+        # -----------------------------------------------------------------
+        if PARADIGM == "filter_based":
+            estimator = RemoteEstimator(**_est_base_kwargs, **est_kwargs)
+        else:
+            estimator = RemoteEstimatorDecisionOnly(**_est_base_kwargs, **est_kwargs)
+
         estimator.init_value(x_hat0, P0)
         estimator.last_decision = initial_decision
+        if policy_type == "resilient_predictive":
+            estimator.reset_aoi_on_transition = True
 
         policy = build_policy(
             policy_type=policy_type,
@@ -261,13 +287,25 @@ if __name__ == "__main__":
             W_1=pol_kwargs.get("W_1", 1),
         )
 
-        results = simulate_system(
-            sensor, estimator, T, policy,
-            blocklength_n=BLOCKLENGTH_N,
-            t_sym=T_SYM,
-            p_t_default=p_t_for_policy,
-            env_seq=env_seq,
-        )
+        # -----------------------------------------------------------------
+        # Choose simulation function based on PARADIGM
+        # -----------------------------------------------------------------
+        if PARADIGM == "filter_based":
+            results = simulate_system(
+                sensor, estimator, T, policy,
+                blocklength_n=BLOCKLENGTH_N,
+                t_sym=T_SYM,
+                p_t_default=p_t_for_policy,
+                env_seq=env_seq,
+            )
+        else:
+            results = simulate_system_decision_only(
+                sensor, estimator, T, policy,
+                blocklength_n=BLOCKLENGTH_N,
+                t_sym=T_SYM,
+                p_t_default=p_t_for_policy,
+                env_seq=env_seq,
+            )
 
         # Attach calibration info for the table
         results["p_t"]  = p_t_for_policy
@@ -291,66 +329,179 @@ if __name__ == "__main__":
         except (TypeError, ValueError):
             return "  N/A  "
 
-    header = (
-        f"{'Method':<24} | {'p_t':>7} | {'rate':>7} | "
-        f"{'FPR':>7} | {'FNR':>7} | {'E[avg]':>9} | "
-        f"{'Prec':>7} | {'Recall':>7}"
-    )
-    sep = "-" * len(header)
-
-    print(f"\n{sep}")
-    print(header)
-    print(sep)
-
-    for name, res in all_results.items():
-        th = res["theta"]
-        if "theta" in th:
-            theta_str = f"θ={th['theta']}"
-        else:
-            theta_str = f"θ₀={th['theta_0']},θ₁={th['theta_1']}"
-
-        row = (
-            f"{name:<24} | "
-            f"{_fmt(res['p_t'])} | "
-            f"{_fmt(res['rate'])} | "
-            f"{_fmt(res['fpr'])} | "
-            f"{_fmt(res['fnr'])} | "
-            f"{_fmt(res['avg_energy'], '.3e')}"
+    if PARADIGM == "filter_based":
+        # ---- filter_based table: FPR, FNR, E[avg], timeliness breakdown ----
+        header = (
+            f"{'Method':<24} | {'p_t':>7} | {'rate':>7} | "
+            f"{'FPR':>7} | {'FNR':>7} | {'E[avg]':>9} | "
+            f"{'Prec':>7} | {'Recall':>7}"
         )
-        print(row)
-        print(f"  {theta_str:<22}   "
-              f"TP={res['n_tp']:3d} FP={res['n_fp']:3d} total={res['total_triggers']:3d}")
+        sep = "-" * len(header)
 
-    # Per-state P(L>=0) breakdown
-    print("\nPer-state timeliness breakdown:")
-    for name, res in all_results.items():
-        s0 = res["stats_s0"]
-        s1 = res["stats_s1"]
-        print(f"  {name:<24} "
-              f"0->1: pred={s0['n_pred']:4d} on-time={s0['n_ontime']:4d} miss={s0['n_miss']:4d} "
-              f"P(L>=0)={_fmt(s0['prob_L_geq_0'])} E[L|L>0]={_fmt(s0['avg_pred_horizon'])}  |  "
-              f"1->0: pred={s1['n_pred']:4d} on-time={s1['n_ontime']:4d} miss={s1['n_miss']:4d} "
-              f"P(L>=0)={_fmt(s1['prob_L_geq_0'])} E[L|L>0]={_fmt(s1['avg_pred_horizon'])}")
+        print(f"\n{sep}")
+        print(header)
+        print(sep)
 
-    print(sep)
+        for name, res in all_results.items():
+            th = res["theta"]
+            theta_str = (f"θ={th['theta']}" if "theta" in th
+                         else f"θ₀={th['theta_0']},θ₁={th['theta_1']}")
 
-    # ------------------------------------------------------------------
-    # Plots
-    # ------------------------------------------------------------------
-    plot_results(all_results["resilient_predictive"], Delta)
-    # plot_results(all_results["probability"], Delta)
-    plot_horizon_histograms(all_results)
+            row = (
+                f"{name:<24} | "
+                f"{_fmt(res['p_t'])} | "
+                f"{_fmt(res['rate'])} | "
+                f"{_fmt(res['fpr'])} | "
+                f"{_fmt(res['fnr'])} | "
+                f"{_fmt(res['avg_energy'], '.3e')}"
+            )
+            print(row)
+            print(f"  {theta_str:<22}   "
+                  f"TP={res['n_tp']:3d} FP={res['n_fp']:3d} total={res['total_triggers']:3d}")
 
-    policy_names = [
-        "resilient_predictive",
-        "predictive",
-        "event_trigger",
-        "probability",
-        "aoii",
-    ]
+        print("\nPer-state timeliness breakdown:")
+        for name, res in all_results.items():
+            s0 = res["stats_s0"]
+            s1 = res["stats_s1"]
+            print(f"  {name:<24} "
+                  f"0->1: pred={s0['n_pred']:4d} on-time={s0['n_ontime']:4d} miss={s0['n_miss']:4d} "
+                  f"P(L>=0)={_fmt(s0['prob_L_geq_0'])} E[L|L>0]={_fmt(s0['avg_pred_horizon'])}  |  "
+                  f"1->0: pred={s1['n_pred']:4d} on-time={s1['n_ontime']:4d} miss={s1['n_miss']:4d} "
+                  f"P(L>=0)={_fmt(s1['prob_L_geq_0'])} E[L|L>0]={_fmt(s1['avg_pred_horizon'])}")
 
-    export_horizon_histogram_full_csv(
-        all_results,
-        policy_names=policy_names,
-        filename="data/predicted_horizon_histogram_full.csv",
-    )
+        print(sep)
+
+        # ---- filter_based plots ----
+        plot_results(all_results["resilient_predictive"], Delta)
+        # plot_results(all_results["probability"], Delta)
+        plot_horizon_histograms(all_results)
+
+        policy_names = [
+            "resilient_predictive",
+            "predictive",
+            "event_trigger",
+            "probability",
+            "aoii",
+        ]
+
+        export_horizon_histogram_full_csv(
+            all_results,
+            policy_names=policy_names,
+            filename="data/predicted_horizon_histogram_full.csv",
+        )
+
+    else:
+        # ---- decision_adoption table: FPR, FNR, P(L>=0), P(L>0) ----------------
+        # E[I_s] is not reported (only available for resilient_predictive and
+        # predictive in filter_based and not meaningful here).
+        header2 = (
+            f"{'Method':<24} | {'FPR':>7} | {'FNR':>7} | "
+            f"{'P(L>=0)':>8} | {'P(L>0)':>7}"
+        )
+        sep2 = "-" * len(header2)
+
+        print(f"\n[decision_adoption — decision-only estimator]")
+        print(f"{sep2}")
+        print(header2)
+        print(sep2)
+
+        for name, res in all_results.items():
+            th = res["theta"]
+            theta_str = (f"θ={th['theta']}" if "theta" in th
+                         else f"θ₀={th['theta_0']},θ₁={th['theta_1']}")
+
+            row2 = (
+                f"{name:<24} | "
+                f"{_fmt(res['fpr'])} | "
+                f"{_fmt(res['fnr'])} | "
+                f"{_fmt(res.get('prob_L_geq_0'))} | "
+                f"{_fmt(res.get('prob_L_gt_0'))}"
+            )
+            print(row2)
+            print(f"  {theta_str}")
+
+        print("\nPer-state timeliness breakdown (decision_adoption):")
+        for name, res in all_results.items():
+            s0 = res["stats_s0"]
+            s1 = res["stats_s1"]
+            print(f"  {name:<24} "
+                  f"0->1: pred={s0['n_pred']:4d} on-time={s0['n_ontime']:4d} miss={s0['n_miss']:4d} "
+                  f"P(L>=0)={_fmt(s0['prob_L_geq_0'])} E[L|L>0]={_fmt(s0['avg_pred_horizon'])}  |  "
+                  f"1->0: pred={s1['n_pred']:4d} on-time={s1['n_ontime']:4d} miss={s1['n_miss']:4d} "
+                  f"P(L>=0)={_fmt(s1['prob_L_geq_0'])} E[L|L>0]={_fmt(s1['avg_pred_horizon'])}")
+
+        print(sep2)
+
+        # ---- decision_adoption plots (horizon histograms for all policies) -------
+        plot_horizon_histograms(all_results)
+
+        # plot_results expects a continuous est_values (c^T x_hat) which is not
+        # available in decision_adoption mode (no Kalman filter at the estimator).
+        # Synthesize it from the binary est_events: map 1 -> Delta+step, 0 -> Delta-step,
+        # using half the std of true_values so the step is proportional to signal spread.
+        _rp = all_results["resilient_predictive"]
+        _step = float(np.std(_rp["true_values"])) * 0.5 or 0.1
+        _patched = dict(_rp, est_values=Delta + (_rp["est_events"].astype(float) * 2 - 1) * _step)
+        plot_results(_patched, Delta)
+
+    rp = all_results["resilient_predictive"]
+    s0 = rp["stats_s0"]
+    s1 = rp["stats_s1"]
+
+    def _state_counts(st):
+        n_pred = int(st.get("n_pred", 0))      # L > 0
+        n_ontime = int(st.get("n_ontime", 0))  # L = 0
+        n_miss = int(st.get("n_miss", 0))      # L < 0
+        n_success = n_pred + n_ontime
+        n_total = n_success + n_miss
+        return n_pred, n_ontime, n_miss, n_success, n_total
+
+    p0, o0, m0, succ0, total0 = _state_counts(s0)
+    p1, o1, m1, succ1, total1 = _state_counts(s1)
+
+    succ_total = succ0 + succ1
+    miss_total = m0 + m1
+    n_total = total0 + total1
+
+    eps_bar_design = float(best_design["eps_bar"])
+
+    print("\n[Correct empirical reliability diagnostic]")
+
+    if n_total > 0:
+        p_L_geq_0_emp = succ_total / n_total
+        eps_emp = miss_total / n_total
+
+        p_hit_emp = (
+            (eps_emp - eps_bar_design) / (1.0 - eps_bar_design)
+            if eps_emp >= eps_bar_design and eps_bar_design < 1.0
+            else 0.0
+        )
+
+        print(f"P(L>=0) empirical       = {p_L_geq_0_emp:.6f}")
+        print(f"eps_emp=1-P(L>=0)       = {eps_emp:.6f}")
+        print(f"eps_bar design          = {eps_bar_design:.6f}")
+        print(f"p_hit empirical implied = {p_hit_emp:.6f}")
+        print(f"p_hit model             = {best_design.get('p_hit_P', float('nan')):.6f}")
+        print(f"eps_P model             = {best_design.get('eps_P', float('nan')):.6f}")
+
+    for label, st, p_hit_model_key in [
+        ("0->1", s0, "p_hit_state0"),
+        ("1->0", s1, "p_hit_state1"),
+    ]:
+        n_pred, n_ontime, n_miss, n_success, n_state_total = _state_counts(st)
+        if n_state_total <= 0:
+            continue
+
+        eps_emp_s = n_miss / n_state_total
+        p_L_geq_s = n_success / n_state_total
+        p_hit_emp_s = (
+            (eps_emp_s - eps_bar_design) / (1.0 - eps_bar_design)
+            if eps_emp_s >= eps_bar_design and eps_bar_design < 1.0
+            else 0.0
+        )
+
+        print(f"\n[{label}]")
+        print(f"  P(L>=0) empirical       = {p_L_geq_s:.6f}")
+        print(f"  eps_emp                 = {eps_emp_s:.6f}")
+        print(f"  p_hit empirical implied = {p_hit_emp_s:.6f}")
+        print(f"  p_hit model             = {best_design.get(p_hit_model_key, float('nan')):.6f}")

@@ -669,33 +669,6 @@ def compute_transition_miss_probability(p_hit_P: float, eps_bar: float) -> float
     return float(np.clip(p_hit_P + (1.0 - p_hit_P) * eps_bar, 0.0, 1.0))
 
 
-def apply_p_hit_safety_guard(hit_info: Dict[str, Any], params: ParamsLike) -> Dict[str, Any]:
-    """
-    Optional conservative guard for the semi-closed p_hit approximation.
-
-    Defaults are PHIT_SAFETY_FACTOR=1 and PHIT_SAFETY_MARGIN=0, which leave
-    the model unchanged. Keep this hook because the closed-form p_hit model is
-    an approximation; if future experiments show systematic underestimation, a
-    small factor/margin can be used without changing the solver structure.
-    """
-    if "p_hit_P_raw" in hit_info:
-        return hit_info
-
-    factor = float(_get_param(params, "PHIT_SAFETY_FACTOR", 1.0))
-    margin = float(_get_param(params, "PHIT_SAFETY_MARGIN", 0.0))
-
-    out = dict(hit_info)
-    for key in ["p_hit_P", "p_hit_P_linear", "p_hit_state0", "p_hit_state1"]:
-        if key in out:
-            raw = float(out[key])
-            out[key + "_raw"] = raw
-            out[key] = float(np.clip(factor * raw + margin, 0.0, 1.0))
-
-    out["p_hit_safety_factor"] = factor
-    out["p_hit_safety_margin"] = margin
-    return out
-
-
 def find_min_pt_for_packet_error(
     eps_target: float,
     params: ParamsLike,
@@ -1088,7 +1061,6 @@ def evaluate_resilience_design(
 
     pr = float(_get_param(params, "P_R", 0.05))
     eps_l = float(_get_param(params, "EPSILON_L", 0.05))
-    eps_l_design = float(_get_param(params, "EPSILON_L_DESIGN", eps_l))
     eps_r = float(_get_param(params, "EPSILON_R", 0.05))
     n_block = int(_get_param(params, "BLOCKLENGTH_N", 128))
     objective_factor = int(_get_param(params, "OBJECTIVE_BLOCKLENGTH_FACTOR", 1))
@@ -1105,16 +1077,8 @@ def evaluate_resilience_design(
     if not (0.0 < eps_r < 1.0):
         return {"feasible": False, "reason": "eps_r_must_be_in_0_1", "pt": pt, "theta0": theta0, "theta1": theta1, "eps_r": eps_r}
 
-    if not (0.0 < eps_l < 1.0) or not (0.0 < eps_l_design < 1.0):
-        return {
-            "feasible": False,
-            "reason": "eps_l_must_be_in_0_1",
-            "pt": pt,
-            "theta0": theta0,
-            "theta1": theta1,
-            "eps_l": eps_l,
-            "eps_l_design": eps_l_design,
-        }
+    if not (0.0 < eps_l < 1.0):
+        return {"feasible": False, "reason": "eps_l_must_be_in_0_1", "pt": pt, "theta0": theta0, "theta1": theta1, "eps_l": eps_l}
 
     avg_eps_info = compute_average_packet_error(pt=pt, params=params, method=average_eps_method)
     eps_bar = float(avg_eps_info["eps_bar"])
@@ -1151,17 +1115,31 @@ def evaluate_resilience_design(
     else:
         hit_info = precomputed_hit
 
+    p_hit_P = float(hit_info["p_hit_P"])
+    eps_P = compute_transition_miss_probability(p_hit_P=p_hit_P, eps_bar=eps_bar)
+
+    eps_P_state0 = compute_transition_miss_probability(
+        p_hit_P=hit_info["p_hit_state0"],
+        eps_bar=eps_bar,
+    )
+
+    eps_P_state1 = compute_transition_miss_probability(
+        p_hit_P=hit_info["p_hit_state1"],
+        eps_bar=eps_bar,
+    )
+
     require_statewise = bool(_get_param(params, "REQUIRE_STATEWISE_LEAD_TIME", True))
 
-    p_hit_P = float(hit_info["p_hit_P"])
-    p_hit_state0 = float(hit_info["p_hit_state0"])
-    p_hit_state1 = float(hit_info["p_hit_state1"])
+    eps_P_state0 = compute_transition_miss_probability(
+        p_hit_P=float(hit_info["p_hit_state0"]),
+        eps_bar=eps_bar,
+    )
+    eps_P_state1 = compute_transition_miss_probability(
+        p_hit_P=float(hit_info["p_hit_state1"]),
+        eps_bar=eps_bar,
+    )
 
-    eps_P = compute_transition_miss_probability(p_hit_P=p_hit_P, eps_bar=eps_bar)
-    eps_P_state0 = compute_transition_miss_probability(p_hit_P=p_hit_state0, eps_bar=eps_bar)
-    eps_P_state1 = compute_transition_miss_probability(p_hit_P=p_hit_state1, eps_bar=eps_bar)
-
-    if eps_P > eps_l_design + 1e-12:
+    if eps_P > eps_l + 1e-12:
         return {
             "feasible": False,
             "reason": "overall_transition_miss_constraint_violated",
@@ -1170,18 +1148,15 @@ def evaluate_resilience_design(
             "theta1": theta1,
             "eps_bar": eps_bar,
             "eps_l": eps_l,
-            "eps_l_design": eps_l_design,
             "eps_r": eps_r,
             "eps_P": eps_P,
             "eps_P_state0": eps_P_state0,
             "eps_P_state1": eps_P_state1,
             "p_hit_P": p_hit_P,
-            "p_hit_state0": p_hit_state0,
-            "p_hit_state1": p_hit_state1,
             "hit_info": hit_info,
         }
 
-    if require_statewise and max(eps_P_state0, eps_P_state1) > eps_l_design + 1e-12:
+    if require_statewise and max(eps_P_state0, eps_P_state1) > eps_l + 1e-12:
         return {
             "feasible": False,
             "reason": "statewise_transition_miss_constraint_violated",
@@ -1190,14 +1165,13 @@ def evaluate_resilience_design(
             "theta1": theta1,
             "eps_bar": eps_bar,
             "eps_l": eps_l,
-            "eps_l_design": eps_l_design,
             "eps_r": eps_r,
             "eps_P": eps_P,
             "eps_P_state0": eps_P_state0,
             "eps_P_state1": eps_P_state1,
             "p_hit_P": p_hit_P,
-            "p_hit_state0": p_hit_state0,
-            "p_hit_state1": p_hit_state1,
+            "p_hit_state0": float(hit_info["p_hit_state0"]),
+            "p_hit_state1": float(hit_info["p_hit_state1"]),
             "hit_info": hit_info,
         }
 
@@ -1218,11 +1192,8 @@ def evaluate_resilience_design(
     )
     J = compute_energy_objective(pt=pt, n_factor=objective_factor, average_rate=avg_rate)
 
-    hit_values_for_bound = [p_hit_P]
-    if require_statewise:
-        hit_values_for_bound.extend([p_hit_state0, p_hit_state1])
-    if all(h < 1.0 for h in hit_values_for_bound):
-        eps_bar_max_from_lead = min((eps_l_design - h) / (1.0 - h) for h in hit_values_for_bound)
+    if p_hit_P < 1.0:
+        eps_bar_max_from_lead = (eps_l - p_hit_P) / (1.0 - p_hit_P)
     else:
         eps_bar_max_from_lead = -float("inf")
 
@@ -1234,25 +1205,16 @@ def evaluate_resilience_design(
         "theta1": theta1,
         "eps_bar": eps_bar,
         "eps_l": eps_l,
-        "eps_l_design": eps_l_design,
         "eps_r": eps_r,
         "alpha_FR": eps_r,
         "eps_P": eps_P,
-        "eps_P_state0": eps_P_state0,
-        "eps_P_state1": eps_P_state1,
         "eps_transition_miss": eps_P,
         # Backward-compatible aliases; eps_d is now the real transition miss prob.
         "eps_d": eps_P,
         "p_hit_P": p_hit_P,
         "p_blk": p_hit_P,
-        "p_hit_state0": p_hit_state0,
-        "p_hit_state1": p_hit_state1,
-        "p_hit_P_raw": float(hit_info.get("p_hit_P_raw", p_hit_P)),
-        "p_hit_state0_raw": float(hit_info.get("p_hit_state0_raw", p_hit_state0)),
-        "p_hit_state1_raw": float(hit_info.get("p_hit_state1_raw", p_hit_state1)),
-        "p_hit_safety_factor": float(hit_info.get("p_hit_safety_factor", 1.0)),
-        "p_hit_safety_margin": float(hit_info.get("p_hit_safety_margin", 0.0)),
-        "require_statewise_lead_time": require_statewise,
+        "p_hit_state0": float(hit_info["p_hit_state0"]),
+        "p_hit_state1": float(hit_info["p_hit_state1"]),
         "eps_bar_max_from_lead": float(eps_bar_max_from_lead),
         "pu0_star": pu0,
         "pu1_star": pu1,
@@ -1294,6 +1256,8 @@ def evaluate_resilience_design(
         "fp_iterations": 0,
         "fp_residual": 0.0,
         "fp_final_residual": 0.0,
+        "eps_P_state0": eps_P_state0,
+        "eps_P_state1": eps_P_state1,
     }
 
 
@@ -1340,9 +1304,7 @@ def solve_resilience_design(
 
     pr = float(_get_param(params, "P_R", 0.05))
     eps_l = float(_get_param(params, "EPSILON_L", 0.05))
-    eps_l_design = float(_get_param(params, "EPSILON_L_DESIGN", eps_l))
     eps_r = float(_get_param(params, "EPSILON_R", 0.05))
-    require_statewise = bool(_get_param(params, "REQUIRE_STATEWISE_LEAD_TIME", True))
     lam = float(_get_param(params, "TH_RECOVERY_LAMBDA", 4.0))
     kappa = float(_get_param(params, "TH_RECOVERY_KAPPA", 2.0))
     average_eps_method = str(_get_param(params, "AVERAGE_EPSILON_METHOD", "closed_form"))
@@ -1375,7 +1337,6 @@ def solve_resilience_design(
                 "theta0": theta0,
                 "theta1": theta1,
                 "eps_l": eps_l,
-                "eps_l_design": eps_l_design,
                 "eps_r": eps_r,
                 "alpha_FR": eps_r,
             }
@@ -1405,15 +1366,34 @@ def solve_resilience_design(
                 continue
 
             p_hit_P = float(hit_info["p_hit_P"])
+            if not (p_hit_P < eps_l):
+                candidate_base.update({
+                    "feasible": False,
+                    "reason": "p_hit_exceeds_epsilon_l_infeasible_even_with_zero_packet_error",
+                    "p_hit_P": p_hit_P,
+                    "hit_info": hit_info,
+                    "Gamma_0": float(hit_info["Gamma_0"]),
+                    "Gamma_1": float(hit_info["Gamma_1"]),
+                    "Lambda_0": float(hit_info["Lambda_0"]),
+                    "Lambda_1": float(hit_info["Lambda_1"]),
+                })
+                candidates.append(candidate_base)
+                continue
+
+            require_statewise = bool(_get_param(params, "REQUIRE_STATEWISE_LEAD_TIME", True))
+
+            p_hit_P = float(hit_info["p_hit_P"])
             p_hit_state0 = float(hit_info["p_hit_state0"])
             p_hit_state1 = float(hit_info["p_hit_state1"])
 
             lead_hit_values = [p_hit_P]
+
             if require_statewise:
                 lead_hit_values.extend([p_hit_state0, p_hit_state1])
+
             p_hit_worst = max(lead_hit_values)
 
-            if not (p_hit_worst < eps_l_design):
+            if not (p_hit_worst < eps_l):
                 candidate_base.update({
                     "feasible": False,
                     "reason": "p_hit_exceeds_epsilon_l_infeasible_even_with_zero_packet_error",
@@ -1430,7 +1410,10 @@ def solve_resilience_design(
                 candidates.append(candidate_base)
                 continue
 
-            eps_bar_max_from_lead = min((eps_l_design - h) / (1.0 - h) for h in lead_hit_values)
+            eps_bar_max_from_lead = min(
+                (eps_l - p_hit) / (1.0 - p_hit)
+                for p_hit in lead_hit_values
+            )
             eps_bar_max_from_pu = min(eps_r ** (1.0 / theta0), eps_r ** (1.0 / theta1))
             eps_bar_max = min(eps_bar_max_from_lead, eps_bar_max_from_pu)
 
@@ -1541,21 +1524,42 @@ def solve_resilience_design(
             "candidates": candidates,
         }
 
-    warnings = []
-    if int(best["theta0"]) == min(int(x) for x in theta0_candidates):
-        warnings.append("theta0 is at the minimum grid value; the reliability target is forcing aggressive outage detection.")
-    if int(best["theta1"]) == min(int(x) for x in theta1_candidates):
-        warnings.append("theta1 is at the minimum grid value; the reliability target is forcing aggressive outage detection.")
-    if float(best.get("pu0_star", 0.0)) > 0.8 or float(best.get("pu1_star", 0.0)) > 0.8:
-        warnings.append("resilience update probability is high; the design is close to continuous refreshing.")
-    best["warnings"] = warnings
-
     return {
         "feasible": True,
         "best_design": best,
         "predictive_stats": predictive_stats,
         "candidates": candidates,
     }
+
+def apply_p_hit_safety_guard(
+    hit_info: Dict[str, Any],
+    params: ParamsLike,
+) -> Dict[str, Any]:
+    """
+    Inflate transition-conditioned blackout-hit probabilities to compensate
+    for modeling mismatch between the semi-closed Gamma/Lambda approximation
+    and the full simulator.
+
+    Set PHIT_SAFETY_FACTOR=1 and PHIT_SAFETY_MARGIN=0 to disable.
+    """
+    if "p_hit_P_raw" in hit_info:
+        # Already guarded.
+        return hit_info
+
+    factor = float(_get_param(params, "PHIT_SAFETY_FACTOR", 1.0))
+    margin = float(_get_param(params, "PHIT_SAFETY_MARGIN", 0.0))
+
+    out = dict(hit_info)
+
+    for key in ["p_hit_P", "p_hit_state0", "p_hit_state1", "p_hit_P_linear"]:
+        if key in out:
+            raw = float(out[key])
+            out[key + "_raw"] = raw
+            out[key] = float(np.clip(factor * raw + margin, 0.0, 1.0))
+
+    out["p_hit_safety_factor"] = factor
+    out["p_hit_safety_margin"] = margin
+    return out
 
 
 if __name__ == "__main__":
@@ -1577,17 +1581,12 @@ if __name__ == "__main__":
         print(f"pt lower           : {best.get('pt_lower', float('nan')):.6f}")
         print(f"eps_bar            : {best['eps_bar']:.6f}")
         print(f"eps_l              : {best['eps_l']:.6f}")
-        print(f"eps_l design       : {best.get('eps_l_design', best['eps_l']):.6f}")
         print(f"eps_r / alpha_FR   : {best['eps_r']:.6f}")
         print(f"eps_P=P(L<0)       : {best['eps_P']:.6f}")
-        print(f"eps_P state 0      : {best.get('eps_P_state0', float('nan')):.6f}")
-        print(f"eps_P state 1      : {best.get('eps_P_state1', float('nan')):.6f}")
         print(f"P(L>=0) predicted  : {1.0 - best['eps_P']:.6f}")
         print(f"p_hit_P            : {best['p_hit_P']:.6f}")
         print(f"p_hit state 0      : {best['p_hit_state0']:.6f}")
         print(f"p_hit state 1      : {best['p_hit_state1']:.6f}")
-        print(f"p_hit_P raw        : {best.get('p_hit_P_raw', best['p_hit_P']):.6f}")
-        print(f"p_hit safety factor: {best.get('p_hit_safety_factor', 1.0):.3f}")
         print(f"eps_bar max        : {best.get('eps_bar_max', float('nan')):.6f}")
         print(f"pu0*               : {best['pu0_star']:.6f}")
         print(f"pu1*               : {best['pu1_star']:.6f}")
@@ -1610,5 +1609,13 @@ if __name__ == "__main__":
         print(f"markov source      : {best['markov_source']}")
         print(f"outage method      : {best['outage_constraint_method']}")
         print(f"line search        : {best.get('line_search_success', False)}")
-        for warning in best.get("warnings", []):
-            print(f"WARNING            : {warning}")
+        print(f"eps_P state 0       : {best.get('eps_P_state0', float('nan')):.6f}")
+        print(f"eps_P state 1       : {best.get('eps_P_state1', float('nan')):.6f}")
+
+        print(f"p_hit_P raw         : {best.get('p_hit_P_raw', best.get('p_hit_P', float('nan'))):.6f}")
+        print(f"p_hit_P guarded     : {best.get('p_hit_P', float('nan')):.6f}")
+        print(f"p_hit state 0 raw   : {best.get('p_hit_state0_raw', best.get('p_hit_state0', float('nan'))):.6f}")
+        print(f"p_hit state 0 guard : {best.get('p_hit_state0', float('nan')):.6f}")
+        print(f"p_hit state 1 raw   : {best.get('p_hit_state1_raw', best.get('p_hit_state1', float('nan'))):.6f}")
+        print(f"p_hit state 1 guard : {best.get('p_hit_state1', float('nan')):.6f}")
+        print(f"p_hit safety factor : {best.get('p_hit_safety_factor', 1.0):.3f}")
